@@ -76,6 +76,8 @@ def nf4xf32_to_f32_select(x):
 
 
 sr = jax.lax.shift_right_logical
+sl = jax.lax.shift_left
+ba = jax.lax.bitwise_and
 
 def i8tou8(x):
     return jnp.where(x < 0, 256 + x, x)
@@ -93,7 +95,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
     # tensors = [t.view(jnp.int8) if t.dtype == jnp.uint8 else t for t in tensors]
 
     if not backward:
-        block_x, block_y, block_k = 1024, 512, 512
+        block_x, block_y, block_k = 512, 512, 512
     else:
         # block_x, block_y, block_k = 256, 1024, 256
         block_x, block_y, block_k = 256, 256, 512
@@ -207,6 +209,7 @@ def bf16_to_f32(x):
     return sign * man
 
 
+int32_mask = int(jnp.array(0xFFFF0000, dtype=jnp.uint32).view(jnp.int32))
 def matmul_nf4_kernel(
     inputs_ref, quants_ref, scale_ref, outputs_ref, accum_ref, *, block_k
 ):
@@ -232,29 +235,29 @@ def matmul_nf4_kernel(
             (pl.dslice(iteration * block_group, block_group), slice(None), slice(None)),
         )
 
-        to_nf4 = nf4xf32_to_f32_select
+        # to_nf4 = nf4xf32_to_f32_select
         # to_nf4 = nf4xf32_to_f32_eqmul
         # to_nf4 = nf4xf32_to_f32
         assert quants.dtype == jnp.int8
-        sr = jax.lax.shift_right_logical
 
-        quants = quants.astype(jnp.int32)
         quants = i8tou8(quants)
+        quants = quants.astype(jnp.int32)
         # within 1 byte
-        w1 = to_nf4(sr(quants, 4)) * scale
-        w2 = to_nf4(quants & 0b1111) * scale
+        w1 = nf4xf32_to_f32_select(sr(quants, 4)) * scale
+        w2 = nf4xf32_to_f32_select(quants & 0b1111) * scale
 
         # i = inputs.shape[-1] // 2
         i = block_k // 2
         # inputs_ = inputs.view(jnp.int32)
 
         # little-endian!
-        inputs1 = inputs & 0xFFFF
-        # inputs1 = sl(inputs1, 16).view(jnp.float32)
-        inputs1 = bf16_to_f32(inputs1)
-        inputs2 = sr(inputs, 16)
+        inputs1 = ba(inputs, 0xFFFF)
+        inputs1 = sl(inputs1, 16).view(jnp.float32)
+        # inputs1 = bf16_to_f32(inputs1)
+        # inputs2 = sr(inputs, 16)
         # inputs2 = sl(inputs2, 16).view(jnp.float32)
-        inputs2 = bf16_to_f32(inputs2)
+        inputs2 = ba(inputs, int32_mask).view(jnp.float32)
+        # inputs2 = bf16_to_f32(inputs2)
 
         # inputs1 = pl.load(inputs_ref, (slice(None), pl.dslice(iteration*block_k, block_k // 2, 2)))
         # inputs2 = pl.load(inputs_ref, (slice(None), pl.dslice(iteration*block_k+1, block_k // 2, 2)))
@@ -341,7 +344,7 @@ def matmul_nf4(quants, scale, inputs, based=False, snowed=False):
 
 if __name__ == "__main__":
     import timeit
-    a, b, c, bs = 4096, 4096, 4096, 32
+    a, b, c, bs = 8192, 8192, 8192, 64
     quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs // 2, b), 0, 255, dtype=jnp.int8)
     scale = jax.random.normal(jax.random.PRNGKey(1), (a // bs, 1, b), dtype=jnp.bfloat16) / 255
     inputs = jax.random.normal(jax.random.PRNGKey(2), (c, a), dtype=jnp.bfloat16)
