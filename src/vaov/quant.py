@@ -51,7 +51,30 @@ def nf4xf32_to_f32(x):
     )
 
 
-approx_nf4 = nf4xf32_to_f32(jnp.arange(16))
+def nf4xf32_to_f32_eqmul(x):
+    x = x.astype(jnp.float32)
+    result = jnp.zeros_like(x)
+    for i, c in enumerate(nf4.tolist()):
+        result = jnp.where(x == i, c, result)
+    return result
+
+def nf4xf32_to_f32_select(x):
+    x = x.astype(jnp.int32)
+    options = [
+        jnp.full(fill_value=c, dtype=jnp.float32, shape=x.shape) for c in nf4.tolist()
+    ]
+    # options = nf4.tolist()
+    for level in range(3):
+        step = 2 ** (level + 1)
+        a = options[::2]
+        b = options[1::2]
+        new_options = []
+        for k, (i, j) in enumerate(zip(a, b)):
+            new_options.append(jnp.where(x < k * step + 1, i, j))
+        options = new_options
+    return options[0]
+
+
 sr = jax.lax.shift_right_logical
 
 def i8tou8(x):
@@ -70,7 +93,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
     # tensors = [t.view(jnp.int8) if t.dtype == jnp.uint8 else t for t in tensors]
 
     if not backward:
-        block_x, block_y, block_k = 256, 256, 512
+        block_x, block_y, block_k = 1024, 512, 512
     else:
         # block_x, block_y, block_k = 256, 1024, 256
         block_x, block_y, block_k = 256, 256, 512
@@ -159,7 +182,6 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
             # interpret=True,
         )(inputs, *tensors)
         if backward:
-            print(outputs.reshape(outputs.shape[0], -1, 2, block_y // 2).mT.shape)
             outputs = outputs.reshape(outputs.shape[0], -1, 2, block_y // 2).mT.reshape(
                 outputs.shape
             )
@@ -188,7 +210,6 @@ def bf16_to_f32(x):
 def matmul_nf4_kernel(
     inputs_ref, quants_ref, scale_ref, outputs_ref, accum_ref, *, block_k
 ):
-    block_m = quants_ref.shape[2]
     quant_group_size = quants_ref.shape[1] * 2
 
     accum_ref[...] = jnp.zeros_like(accum_ref)
@@ -211,13 +232,11 @@ def matmul_nf4_kernel(
             (pl.dslice(iteration * block_group, block_group), slice(None), slice(None)),
         )
 
-        # to_nf4 = lambda x: nf4[x]
-        to_nf4 = nf4xf32_to_f32
+        to_nf4 = nf4xf32_to_f32_select
+        # to_nf4 = nf4xf32_to_f32_eqmul
+        # to_nf4 = nf4xf32_to_f32
         assert quants.dtype == jnp.int8
-
-        sl = jax.lax.shift_left
         sr = jax.lax.shift_right_logical
-        i8tou8 = lambda x: jnp.where(x < 0, 256 + x, x)
 
         quants = quants.astype(jnp.int32)
         quants = i8tou8(quants)
@@ -291,6 +310,35 @@ def matmul_nf4_kernel_transpose(
     outputs_ref[...] = accum.astype(outputs_ref.dtype)
 
 
+def matmul_nf4(quants, scale, inputs, based=False, snowed=False):
+    if not snowed:
+        to_nf4 = lambda x: nf4[x]
+    else:
+        to_nf4 = nf4xf32_to_f32
+    assert quants.dtype == jnp.int8
+
+    sl = jax.lax.shift_left
+    sr = jax.lax.shift_right_logical
+    i8tou8 = lambda x: jnp.where(x < 0, 256 + x, x)
+
+    quants = quants.astype(jnp.int32)
+    quants = i8tou8(quants)
+    # within 1 byte
+    w1 = to_nf4(sr(quants, 4)) * scale
+    w2 = to_nf4(quants & 0b1111) * scale
+
+    i = inputs.shape[-1] // 2
+    if not based:
+        return inputs[..., ::2] @ w1.reshape(i, -1) + inputs[..., 1::2] @ w2.reshape(
+            i, -1
+        )
+    else:
+        inputs_ = inputs.view(jnp.int32)
+        # little-endian!
+        inputs1 = sl(inputs_ & 0xFFFF, 16).view(jnp.float32)
+        inputs2 = sl(sr(inputs_, 16), 16).view(jnp.float32)
+        return inputs1 @ w1.reshape(i, -1) + inputs2 @ w2.reshape(i, -1)
+
 if __name__ == "__main__":
     import timeit
     a, b, c, bs = 4096, 4096, 4096, 32
@@ -308,7 +356,9 @@ def inner(_it, _timer{init}):
     return _t1 - _t0
 """
     outputs = matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel)
-    number = 20
+    outputs_ = matmul_nf4(quants, scale, inputs)
+    print(jnp.mean(jnp.abs(outputs - outputs_)))
+    number = 1000
     time_per_iter = timeit.timeit(lambda: matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel).block_until_ready(),
                                   number=number,) / number
     print(f"Time: {time_per_iter:.4f}")
