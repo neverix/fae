@@ -4,4 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "equinox",
+    "jax[tpu]",
+    "libtpu-nightly",
+    "orbax",
+]
+
+[tool.uv.sources]
+libtpu-nightly = { index = "https://storage.googleapis.com/jax-releases/libtpu_releases.html" }
+
