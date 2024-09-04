@@ -215,23 +215,26 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
             og_shape = inputs.shape
             inputs = inputs.reshape(inputs.shape[0], -1, block_k // 2, 2)
             inputs = inputs.mT.reshape(og_shape)
-        grid = ceil(inputs.shape[0] / block_x), ceil(y / block_y)
+        grid = ceil(inputs.shape[0] / block_x), ceil(y / block_y), ceil(k / block_k)
         grid_spec = pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             grid=grid,
             in_specs=[
-                pl.BlockSpec(lambda i, j: (i, 0), (block_x, inputs.shape[1])),
+                pl.BlockSpec(lambda i, j, k: (i, k), (block_x, block_k)),
             ]
             + [
-                pl.BlockSpec(lambda i, j: (0, 0, j), (t.shape[0], t.shape[1], block_y))
+                pl.BlockSpec(
+                    lambda i, j, k: (k, 0, j),
+                    (block_k // quant_group_size, t.shape[1], block_y),
+                )
                 if not weight_transpose
                 else pl.BlockSpec(
-                    lambda i, j: (j, 0, 0),
-                    (block_y // quant_group_size, t.shape[1], t.shape[2]),
+                    lambda i, j, k: (j, 0, k),
+                    (block_y // quant_group_size, t.shape[1], block_k),
                 )
                 for t in tensors
             ],
-            out_specs=pl.BlockSpec(lambda i, j: (i, j), (block_x, block_y)),
+            out_specs=pl.BlockSpec(lambda i, j, k: (i, j), (block_x, block_y)),
             scratch_shapes=[pltpu.VMEM((block_x, block_y), jnp.float32)],
         )
         outputs = pl.pallas_call(
@@ -242,7 +245,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
                 (grid[0] * block_x, grid[1] * block_y), inputs_dtype
             ),
             compiler_params=dict(
-                mosaic=dict(dimension_semantics=("parallel", "parallel"))
+                mosaic=dict(dimension_semantics=("parallel", "parallel", "arbitrary"))
             ),
             interpret=False,
         )(inputs, *tensors)
@@ -277,70 +280,60 @@ def matmul_nf4_kernel(
     inputs_ref, quants_ref, scale_ref, outputs_ref, accum_ref,
     *, block_k, inputs_split=False
 ):
+    @pl.when(pl.program_id(axis=2) == 0)
+    def _():
+        accum_ref[...] = jnp.zeros_like(accum_ref)
+
     if inputs_split:
         assert block_k // 2 >= 128
 
-    quant_group_size = quants_ref.shape[1] * 2
 
-    accum_ref[...] = jnp.zeros_like(accum_ref)
+    quants = quants_ref[...]
+    scale = scale_ref[...]
 
-    block_group = block_k // quant_group_size
-    loop_iterations = inputs_ref.shape[-1] * (2 if not inputs_split else 1) // block_k
+    assert quants.dtype == jnp.int8
 
-    def matmul_loop(iteration, _):
-        quants = pl.load(
-            quants_ref,
-            (pl.dslice(iteration * block_group, block_group), slice(None), slice(None)),
+    w1 = to_nf4_8_hi(quants) * scale
+    w2 = to_nf4_8_lo(quants) * scale
+    # # quants = quants.view(jnp.uint8).astype(jnp.uint32).astype(jnp.int32)
+    # quants = quants.astype(jnp.int32)
+    # # quants = quants.astype(jnp.int16)
+    # quants = i8tou8(quants)
+
+    # # within 1 byte
+    # w1 = to_nf4(sr(quants, 4)) * scale
+    # w2 = to_nf4(ba(quants, 0b1111)) * scale
+
+    # i = inputs.shape[-1] // 2
+    i = block_k // 2
+    # inputs_ = inputs.view(jnp.int32)
+
+    if inputs_split:
+        inputs1 = pl.load(
+            inputs_ref,
+            (slice(None), pl.dslice(0, block_k // 2)),
         )
-        scale = pl.load(
-            scale_ref,
-            (pl.dslice(iteration * block_group, block_group), slice(None), slice(None)),
+        inputs2 = pl.load(
+            inputs_ref,
+            (slice(None), pl.dslice((block_k // 2) // 128 * 128, block_k // 2)),
         )
-
-        # to_nf4 = nf4xf32_to_f32_select
-        # to_nf4 = nf4xf32_to_f32_eqmul
-        # to_nf4 = nf4xf32_to_f32
-        assert quants.dtype == jnp.int8
-
-        w1 = to_nf4_8_hi(quants) * scale
-        w2 = to_nf4_8_lo(quants) * scale
-        # # quants = quants.view(jnp.uint8).astype(jnp.uint32).astype(jnp.int32)
-        # quants = quants.astype(jnp.int32)
-        # # quants = quants.astype(jnp.int16)
-        # quants = i8tou8(quants)
-
-        # # within 1 byte
-        # w1 = to_nf4(sr(quants, 4)) * scale
-        # w2 = to_nf4(ba(quants, 0b1111)) * scale
-
-        # i = inputs.shape[-1] // 2
-        i = block_k // 2
-        # inputs_ = inputs.view(jnp.int32)
-
-        if inputs_split:
-            inputs1 = pl.load(
-                inputs_ref,
-                (slice(None), pl.dslice((iteration * block_k), block_k // 2)),
-            )
-            inputs2 = pl.load(
-                inputs_ref,
-                (slice(None), pl.dslice(((iteration * block_k) + block_k // 2) // 128 * 128, block_k // 2)),
-            )
-        else:
-            inputs = pl.load(
-                inputs_ref,
-                (slice(None), pl.dslice((iteration * (block_k // 2)), block_k // 2)),
-            )
-            # little-endian!
-            inputs1 = ba(inputs, 0xFFFF)
-            inputs1 = sl(inputs1, 16).view(jnp.float32)
-            inputs2 = ba(inputs, int32_mask).view(jnp.float32)
-        
-        accum_ref[...] += inputs1 @ w1.reshape(i, -1)
-        accum_ref[...] += inputs2 @ w2.reshape(i, -1)
-
-    jax.lax.fori_loop(0, loop_iterations, matmul_loop, init_val=None, unroll=1)
-    outputs_ref[...] = accum_ref[...].astype(outputs_ref.dtype)
+    else:
+        raise NotImplementedError
+        # inputs = pl.load(
+        #     inputs_ref,
+        #     (slice(None), pl.dslice((iteration * (block_k // 2)), block_k // 2)),
+        # )
+        # # little-endian!
+        # inputs1 = ba(inputs, 0xFFFF)
+        # inputs1 = sl(inputs1, 16).view(jnp.float32)
+        # inputs2 = ba(inputs, int32_mask).view(jnp.float32)
+    
+    accum_ref[...] += jnp.dot(inputs1, w1.reshape(i, -1), preferred_element_type=jnp.float32)
+    accum_ref[...] += jnp.dot(inputs2, w2.reshape(i, -1), preferred_element_type=jnp.float32)
+    
+    @pl.when(pl.program_id(axis=2) == (pl.num_programs(axis=2) - 1))
+    def _():
+        outputs_ref[...] = accum_ref[...].astype(outputs_ref.dtype)
 
 
 def matmul_nf4_kernel_transpose(
