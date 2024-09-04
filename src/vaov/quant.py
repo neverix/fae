@@ -88,7 +88,7 @@ def i8tou8(x):
 @partial(jax.jit, static_argnames=("kernel", "backward"))
 def matmul_fast(inputs, *tensors, kernel, backward=False):
     weight_transpose = backward
-    inputs_32 = False
+    inputs_32 = (not backward) and 0
 
     inputs = inputs.astype(jnp.bfloat16)
     tensors = [
@@ -97,7 +97,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
     # tensors = [t.view(jnp.int8) if t.dtype == jnp.uint8 else t for t in tensors]
 
     if not backward:
-        block_x, block_y, block_k = 512, 512, 512
+        block_x, block_y, block_k = 512, 512, 1024
     else:
         # block_x, block_y, block_k = 256, 1024, 256
         block_x, block_y, block_k = 256, 256, 512
@@ -153,15 +153,15 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
 
     def kernel_call(inputs, *tensors):
         nonlocal kernel
-        inputs_split = not backward and not inputs_32
-        if not backward:
-            kernel = partial(kernel, inputs_split=inputs_split)
+        inputs_split = (not backward) and (not inputs_32)
 
         inputs_dtype = inputs.dtype
         if inputs_32:
             inputs = inputs.view(jnp.int32)
         elif inputs_split:
-            inputs = inputs.reshape(inputs.shape[0], -1, 2).mT.reshape(inputs.shape)
+            og_shape = inputs.shape
+            inputs = inputs.reshape(inputs.shape[0], -1, block_k // 2, 2)
+            inputs = inputs.mT.reshape(og_shape)
         grid = ceil(inputs.shape[0] / block_x), ceil(y / block_y)
         grid_spec = pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
@@ -182,7 +182,8 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
             scratch_shapes=[pltpu.VMEM((block_x, block_y), jnp.float32)],
         )
         outputs = pl.pallas_call(
-            partial(kernel, block_k=block_k),
+            partial(kernel, block_k=block_k,
+                    **(dict(inputs_split=inputs_split) if not backward else {})),
             grid_spec=grid_spec,
             out_shape=jax.ShapeDtypeStruct(
                 (grid[0] * block_x, grid[1] * block_y), inputs_dtype
@@ -190,7 +191,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
             compiler_params=dict(
                 mosaic=dict(dimension_semantics=("parallel", "parallel"))
             ),
-            # interpret=True,
+            interpret=False,
         )(inputs, *tensors)
         if backward:
             outputs = outputs.reshape(outputs.shape[0], -1, 2, block_y // 2).mT.reshape(
@@ -223,14 +224,15 @@ def matmul_nf4_kernel(
     inputs_ref, quants_ref, scale_ref, outputs_ref, accum_ref,
     *, block_k, inputs_split=False
 ):
+    if inputs_split:
+        assert block_k // 2 >= 128
+
     quant_group_size = quants_ref.shape[1] * 2
 
     accum_ref[...] = jnp.zeros_like(accum_ref)
 
     block_group = block_k // quant_group_size
-    k = inputs_ref.shape[-1]
-    half_k = k // 2
-    loop_iterations = max(1, inputs_ref.shape[-1] * 2 // block_k)
+    loop_iterations = inputs_ref.shape[-1] * (2 if not inputs_split else 1) // block_k
 
     def matmul_loop(iteration, _):
         quants = pl.load(
@@ -244,7 +246,7 @@ def matmul_nf4_kernel(
 
         # to_nf4 = nf4xf32_to_f32_select
         # to_nf4 = nf4xf32_to_f32_eqmul
-        # to_nf4 = nf4xf32_to_f32
+        to_nf4 = nf4xf32_to_f32
         assert quants.dtype == jnp.int8
 
         # quants = quants.view(jnp.uint8).astype(jnp.uint32).astype(jnp.int32)
@@ -253,8 +255,8 @@ def matmul_nf4_kernel(
         quants = i8tou8(quants)
 
         # within 1 byte
-        w1 = nf4xf32_to_f32(sr(quants, 4)) * scale
-        w2 = nf4xf32_to_f32(ba(quants, 0b1111)) * scale
+        w1 = to_nf4(sr(quants, 4)) * scale
+        w2 = to_nf4(ba(quants, 0b1111)) * scale
 
         # i = inputs.shape[-1] // 2
         i = block_k // 2
@@ -263,11 +265,11 @@ def matmul_nf4_kernel(
         if inputs_split:
             inputs1 = pl.load(
                 inputs_ref,
-                (slice(None), pl.dslice((iteration * (block_k // 2)), block_k // 2)),
+                (slice(None), pl.dslice((iteration * block_k), block_k // 2)),
             )
             inputs2 = pl.load(
                 inputs_ref,
-                (slice(None), pl.dslice((iteration * (block_k // 2)) + half_k, block_k // 2)),
+                (slice(None), pl.dslice(((iteration * block_k) + block_k // 2) // 128 * 128, block_k // 2)),
             )
         else:
             inputs = pl.load(
@@ -282,7 +284,7 @@ def matmul_nf4_kernel(
         accum_ref[...] += inputs1 @ w1.reshape(i, -1)
         accum_ref[...] += inputs2 @ w2.reshape(i, -1)
 
-    jax.lax.fori_loop(0, loop_iterations, matmul_loop, init_val=None)
+    jax.lax.fori_loop(0, loop_iterations, matmul_loop, init_val=None, unroll=1)
     outputs_ref[...] = accum_ref[...].astype(outputs_ref.dtype)
 
 
@@ -390,7 +392,7 @@ def inner(_it, _timer{init}):
     outputs = matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel)
     outputs_ = inputs @ dequantize(quants, scale)
     print(jnp.mean(jnp.abs(outputs - outputs_)), jnp.mean(jnp.abs(outputs_)))
-    number = 1000
+    number = 100
     time_per_iter = timeit.timeit(lambda: matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel).block_until_ready(),
                                   number=number,) / number
     print(f"Time: {time_per_iter:.4f}")
