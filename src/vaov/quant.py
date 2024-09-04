@@ -64,13 +64,13 @@ def nf4xf32_to_f32_select(x):
         jnp.full(fill_value=c, dtype=jnp.float32, shape=x.shape) for c in nf4.tolist()
     ]
     # options = nf4.tolist()
-    for level in range(3):
-        step = 2 ** (level + 1)
+    for level in range(4):
+        step = 2 ** (level)
         a = options[::2]
         b = options[1::2]
         new_options = []
         for k, (i, j) in enumerate(zip(a, b)):
-            new_options.append(jnp.where(x < k * step + 1, i, j))
+            new_options.append(jnp.where(x < k * step * 2 + step, i, j))
         options = new_options
     return options[0]
 
@@ -81,6 +81,8 @@ ba = jax.lax.bitwise_and
 
 def i8tou8(x):
     return jnp.where(x < 0, 256 + x, x)
+    # return jnp.where(x < 0, 256 - (x - (-129)), x)
+    # return jnp.where(x < 0, 0, x)
 
 
 @partial(jax.jit, static_argnames=("kernel", "backward"))
@@ -240,11 +242,14 @@ def matmul_nf4_kernel(
         # to_nf4 = nf4xf32_to_f32
         assert quants.dtype == jnp.int8
 
-        quants = i8tou8(quants)
+        # quants = quants.view(jnp.uint8).astype(jnp.uint32).astype(jnp.int32)
         quants = quants.astype(jnp.int32)
+        # quants = quants.astype(jnp.int16)
+        quants = i8tou8(quants)
+
         # within 1 byte
-        w1 = nf4xf32_to_f32_select(sr(quants, 4)) * scale
-        w2 = nf4xf32_to_f32_select(quants & 0b1111) * scale
+        w1 = nf4xf32_to_f32(sr(quants, 4)) * scale
+        w2 = nf4xf32_to_f32(ba(quants, 0b1111)) * scale
 
         # i = inputs.shape[-1] // 2
         i = block_k // 2
@@ -253,14 +258,8 @@ def matmul_nf4_kernel(
         # little-endian!
         inputs1 = ba(inputs, 0xFFFF)
         inputs1 = sl(inputs1, 16).view(jnp.float32)
-        # inputs1 = bf16_to_f32(inputs1)
-        # inputs2 = sr(inputs, 16)
-        # inputs2 = sl(inputs2, 16).view(jnp.float32)
         inputs2 = ba(inputs, int32_mask).view(jnp.float32)
-        # inputs2 = bf16_to_f32(inputs2)
-
-        # inputs1 = pl.load(inputs_ref, (slice(None), pl.dslice(iteration*block_k, block_k // 2, 2)))
-        # inputs2 = pl.load(inputs_ref, (slice(None), pl.dslice(iteration*block_k+1, block_k // 2, 2)))
+        
         accum_ref[...] += inputs1 @ w1.reshape(i, -1)
         accum_ref[...] += inputs2 @ w2.reshape(i, -1)
 
@@ -313,38 +312,49 @@ def matmul_nf4_kernel_transpose(
     outputs_ref[...] = accum.astype(outputs_ref.dtype)
 
 
-def matmul_nf4(quants, scale, inputs, based=False, snowed=False):
-    if not snowed:
-        to_nf4 = lambda x: nf4[x]
-    else:
-        to_nf4 = nf4xf32_to_f32
-    assert quants.dtype == jnp.int8
+def dequantize_group(group, scale, codebook, orig_dtype):
+    group = i8tou8(group.astype(np.int32))
+    high = sr(group, jnp.full_like(group, 4))
+    low = group & 0xF
 
-    sl = jax.lax.shift_left
-    sr = jax.lax.shift_right_logical
-    i8tou8 = lambda x: jnp.where(x < 0, 256 + x, x)
+    codebook = codebook.astype(orig_dtype)
 
-    quants = quants.astype(jnp.int32)
-    quants = i8tou8(quants)
-    # within 1 byte
-    w1 = to_nf4(sr(quants, 4)) * scale
-    w2 = to_nf4(quants & 0b1111) * scale
+    # high_vals = codebook[high]
+    # low_vals = codebook[low]
+    # high_vals = nf4xf32_to_f32_eqmul(high)
+    # low_vals = nf4xf32_to_f32_eqmul(low)
+    high_vals = nf4xf32_to_f32_select(high)
+    low_vals = nf4xf32_to_f32_select(low)
 
-    i = inputs.shape[-1] // 2
-    if not based:
-        return inputs[..., ::2] @ w1.reshape(i, -1) + inputs[..., 1::2] @ w2.reshape(
-            i, -1
-        )
-    else:
-        inputs_ = inputs.view(jnp.int32)
-        # little-endian!
-        inputs1 = sl(inputs_ & 0xFFFF, 16).view(jnp.float32)
-        inputs2 = sl(sr(inputs_, 16), 16).view(jnp.float32)
-        return inputs1 @ w1.reshape(i, -1) + inputs2 @ w2.reshape(i, -1)
+    stacked = jnp.stack([high_vals, low_vals], axis=-1)
+    return (stacked * scale).reshape(-1)
+
+def dequantize(quants, scales):
+    codebook = nf4
+
+    half_group_size = quants.shape[1]
+
+    grouped = quants.transpose(2, 0, 1).reshape(-1, half_group_size)
+    scales = scales.transpose(2, 0, 1).reshape(-1)
+
+    dequantized_groups = jax.vmap(dequantize_group, in_axes=(0, 0, None, None))(
+        grouped, scales, codebook, jnp.bfloat16
+    )
+
+    unquant_matrix = dequantized_groups.reshape(quants.shape[2], -1).T
+
+    return unquant_matrix
 
 if __name__ == "__main__":
+    # x = jnp.arange(16, dtype=jnp.int32)
+    # print(nf4[x].tolist())
+    # print(nf4xf32_to_f32(x).tolist())
+    # print((nf4xf32_to_f32_eqmul(x) - nf4).tolist())
+    # print((nf4xf32_to_f32_select(x) - nf4).tolist())
+    # exit()
     import timeit
     a, b, c, bs = 8192, 8192, 8192, 64
+    # a, b, c, bs = 2048, 2048, 2048, 64
     quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs // 2, b), 0, 255, dtype=jnp.int8)
     scale = jax.random.normal(jax.random.PRNGKey(1), (a // bs, 1, b), dtype=jnp.bfloat16) / 255
     inputs = jax.random.normal(jax.random.PRNGKey(2), (c, a), dtype=jnp.bfloat16)
@@ -359,8 +369,8 @@ def inner(_it, _timer{init}):
     return _t1 - _t0
 """
     outputs = matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel)
-    outputs_ = matmul_nf4(quants, scale, inputs)
-    print(jnp.mean(jnp.abs(outputs - outputs_)))
+    outputs_ = inputs @ dequantize(quants, scale)
+    print(jnp.mean(jnp.abs(outputs - outputs_)), jnp.mean(jnp.abs(outputs_)))
     number = 1000
     time_per_iter = timeit.timeit(lambda: matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel).block_until_ready(),
                                   number=number,) / number
