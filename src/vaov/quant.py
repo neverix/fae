@@ -1,4 +1,5 @@
 import jax
+import jaxlib
 from dataclasses import dataclass
 import jax.numpy as jnp
 import jax.numpy as jnp
@@ -32,60 +33,8 @@ nf4 = jnp.asarray(
     ]
 )
 
-def to_nf4_8_hi(x):
-    # if 1:
-    #     # simulate 8-bit polynomial
-    #     x = ba(x, 0b11110000)
-    #     x = (
-    #         x * (x * (19 * x - 17) + 109) - 18
-    #     )
-    #     return x.astype(jnp.float32) / 127
-
-    x = x.astype(jnp.int32)
-    # x = jax.lax.div(x, 16)
-
-    # x = sr(x, 4)
-    # return nf4xf32_to_f32(x)
-
-    x = ba(x, 0b11110000)
-    return nf4xf32_to_f32(x, x_mul=1/16)
-
-def to_nf4_8_lo(x):
-    # if 1:
-    #     # simulate 8-bit polynomial
-    #     x = ba(x, 0b1111)
-    #     x = x * (x * (19 * x - 17) + 109) - 18
-    #     return x.astype(jnp.float32) / 127
-
-    x = x.astype(jnp.int32)
-    x = ba(x, 0b1111)
-    # x = sr(sl(x, 4), 4)
-    return nf4xf32_to_f32(x)
-
-def nf4xf32_to_f32(x, x_mul=1.0):
+def nf4xf32_to_f32(x):
     x = x.astype(jnp.float32)
-
-    # if x_mul == 1/16:
-    #     # simulate constant folding
-    #     return (
-    #         x
-    #         * (
-    #             x
-    #             * (
-    #                 x
-    #                 * (
-    #                     x * (1.82943132356953e-5 * x - 0.00068587779130373)
-    #                     + 0.0100420261313669
-    #                 )
-    #                 - 0.0722703570217226
-    #             )
-    #             + 0.346075459755188
-    #         )
-    #         - 0.994166218659335
-    #     )
-    if x_mul != 1.0:
-        x *= x_mul
-    # return x * 0.01 - 1
     return (
         x
         * (
@@ -134,8 +83,6 @@ ba = jax.lax.bitwise_and
 
 def i8tou8(x):
     return jnp.where(x < 0, 256 + x, x)
-    # return jnp.where(x < 0, 256 - (x - (-129)), x)
-    # return jnp.where(x < 0, 0, x)
 
 
 def i4tou4(x):
@@ -145,7 +92,6 @@ def i4tou4(x):
 @partial(jax.jit, static_argnames=("kernel", "backward", "blocks"))
 def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
     weight_transpose = backward
-    inputs_32 = (not backward) and 0
 
     inputs = inputs.astype(jnp.bfloat16)
     tensors = [
@@ -155,9 +101,8 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
 
     if blocks is None:
         if not backward:
-            # block_x, block_y, block_k = 1024, 512, 1024  # 55%
-            # block_x, block_y, block_k = 2048, 512, 512  # 61%
-            block_x, block_y, block_k = 4096, 256, 256  # 62%
+            # block_x, block_y, block_k = 4096, 256, 256  # 78%
+            block_x, block_y, block_k = 2048, 512, 512 # 82.9%
         else:
             # block_x, block_y, block_k = 256, 1024, 256
             block_x, block_y, block_k = 256, 256, 512
@@ -214,17 +159,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
         assert inputs.shape[1] == tensors[0].shape[2]
 
     def kernel_call(inputs, *tensors):
-        nonlocal kernel
-        inputs_split = (not backward) and (not inputs_32)
-
         inputs_dtype = inputs.dtype
-        if inputs_32:
-            inputs = inputs.view(jnp.int32)
-        elif inputs_split:
-            pass
-            # og_shape = inputs.shape
-            # inputs = inputs.reshape(inputs.shape[0], -1, block_k // 2, 2)
-            # inputs = inputs.mT.reshape(og_shape)
         grid = ceil(inputs.shape[0] / block_x), ceil(y / block_y), ceil(k / block_k)
         grid_spec = pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
@@ -248,8 +183,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
             scratch_shapes=[pltpu.VMEM((block_x, block_y), jnp.float32)],
         )
         outputs = pl.pallas_call(
-            partial(kernel, block_k=block_k,
-                    **(dict(inputs_split=inputs_split) if not backward else {})),
+            partial(kernel, block_k=block_k),
             grid_spec=grid_spec,
             out_shape=jax.ShapeDtypeStruct(
                 (grid[0] * block_x, grid[1] * block_y), inputs_dtype
@@ -288,7 +222,7 @@ def bf16_to_f32(x):
 int32_mask = int(jnp.array(0xFFFF0000, dtype=jnp.uint32).view(jnp.int32))
 def matmul_nf4_kernel(
     inputs_ref, quants_ref, scale_ref, outputs_ref, accum_ref,
-    *, block_k, inputs_split=False
+    *, block_k
 ):
     @pl.when(pl.program_id(axis=2) == 0)
     def _():
@@ -300,44 +234,8 @@ def matmul_nf4_kernel(
 
     quants = i4tou4(quants.astype(jnp.int32))
     w1 = nf4xf32_to_f32(quants) * scale
-    # # quants = quants.view(jnp.uint8).astype(jnp.uint32).astype(jnp.int32)
-    # quants = quants.astype(jnp.int32)
-    # # quants = quants.astype(jnp.int16)
-    # quants = i8tou8(quants)
-
-    # # within 1 byte
-    # w1 = to_nf4(sr(quants, 4)) * scale
-    # w2 = to_nf4(ba(quants, 0b1111)) * scale
-
-    # i = inputs.shape[-1] // 2
-    # i = block_k // 2
-    i = block_k
-    # inputs_ = inputs.view(jnp.int32)
-
-    if inputs_split:
-        # inputs1 = pl.load(
-        #     inputs_ref,
-        #     (slice(None), pl.dslice(0, block_k // 2)),
-        # )
-        # inputs2 = pl.load(
-        #     inputs_ref,
-        #     (slice(None), pl.dslice((block_k // 2) // 128 * 128, block_k // 2)),
-        # )
-        inputs = inputs_ref[...]
-    else:
-        raise NotImplementedError
-        # inputs = pl.load(
-        #     inputs_ref,
-        #     (slice(None), pl.dslice((iteration * (block_k // 2)), block_k // 2)),
-        # )
-        # # little-endian!
-        # inputs1 = ba(inputs, 0xFFFF)
-        # inputs1 = sl(inputs1, 16).view(jnp.float32)
-        # inputs2 = ba(inputs, int32_mask).view(jnp.float32)
-    
-    accum_ref[...] += jnp.dot(inputs, w1.reshape(i, -1), preferred_element_type=jnp.float32)
-    # accum_ref[...] += jnp.dot(inputs1, w1.reshape(i, -1), preferred_element_type=jnp.float32)
-    # accum_ref[...] += jnp.dot(inputs2, w2.reshape(i, -1), preferred_element_type=jnp.float32)
+    inputs = inputs_ref[...]
+    accum_ref[...] += jnp.dot(inputs, w1.reshape(block_k, -1), preferred_element_type=jnp.float32)
     
     @pl.when(pl.program_id(axis=2) == (pl.num_programs(axis=2) - 1))
     def _():
@@ -462,6 +360,7 @@ if __name__ == "__main__":
     print(jnp.mean(jnp.abs(outputs - outputs_)), jnp.mean(jnp.abs(outputs_)))
     mfu = time_mfu(100, verbose=True)
     print(f"MFU: {mfu:.2f}")
+
     exit()
 
     options = [256, 512, 1024, 2048, 4096]
@@ -470,8 +369,8 @@ if __name__ == "__main__":
     from itertools import product
     options = list(product(options, options, options))
     random.shuffle(options)
-    max_mfu = 0
-    best = None
+    max_mfu = -1
+    best = (0, 0, 0)
     failed = set()
     for x, y, z in (bar := tqdm(options)):
         group = (x, y, z)
@@ -480,8 +379,7 @@ if __name__ == "__main__":
                 continue
         try:
             mfu = time_mfu(10, group)
-        except Exception as e:
-            print(type(e))
+        except jaxlib.xla_extension.XlaRuntimeError:
             failed.add(group)
             mfu = 0
         max_mfu, best = max((max_mfu, best), (mfu, group))
