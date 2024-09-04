@@ -138,8 +138,8 @@ def i8tou8(x):
     # return jnp.where(x < 0, 0, x)
 
 
-@partial(jax.jit, static_argnames=("kernel", "backward"))
-def matmul_fast(inputs, *tensors, kernel, backward=False):
+@partial(jax.jit, static_argnames=("kernel", "backward", "blocks"))
+def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
     weight_transpose = backward
     inputs_32 = (not backward) and 0
 
@@ -149,12 +149,16 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
     ]
     # tensors = [t.view(jnp.int8) if t.dtype == jnp.uint8 else t for t in tensors]
 
-    if not backward:
-        # block_x, block_y, block_k = 1024, 512, 1024  # 55%
-        block_x, block_y, block_k = 2048, 512, 512  # 61%
+    if blocks is None:
+        if not backward:
+            # block_x, block_y, block_k = 1024, 512, 1024  # 55%
+            # block_x, block_y, block_k = 2048, 512, 512  # 61%
+            block_x, block_y, block_k = 4096, 256, 256  # 62%
+        else:
+            # block_x, block_y, block_k = 256, 1024, 256
+            block_x, block_y, block_k = 256, 256, 512
     else:
-        # block_x, block_y, block_k = 256, 1024, 256
-        block_x, block_y, block_k = 256, 256, 512
+        block_x, block_y, block_k = blocks
 
     if not weight_transpose:
         # tensor 0 is special and is fullest
@@ -415,20 +419,10 @@ def dequantize(quants, scales):
 
     return unquant_matrix
 
-if __name__ == "__main__":
-    # x = jnp.arange(16, dtype=jnp.int32)
-    # print(nf4[x].tolist())
-    # print(nf4xf32_to_f32(x).tolist())
-    # print((nf4xf32_to_f32_eqmul(x) - nf4).tolist())
-    # print((nf4xf32_to_f32_select(x) - nf4).tolist())
-    # exit()
+def time_mfu(number=100, blocks=None, verbose=False):
     import timeit
-    a, b, c, bs = 8192, 8192, 8192, 64
-    # a, b, c, bs = 2048, 2048, 2048, 64
-    quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs // 2, b), 0, 255, dtype=jnp.int8)
-    scale = jax.random.normal(jax.random.PRNGKey(1), (a // bs, 1, b), dtype=jnp.bfloat16) / 255
-    inputs = jax.random.normal(jax.random.PRNGKey(2), (c, a), dtype=jnp.bfloat16)
-    timeit.template = """
+    if verbose:
+        timeit.template = """
 def inner(_it, _timer{init}):
     from tqdm import tqdm
     {setup}
@@ -437,17 +431,64 @@ def inner(_it, _timer{init}):
         {stmt}
     _t1 = _timer()
     return _t1 - _t0
-"""
-    outputs = matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel)
-    outputs_ = inputs @ dequantize(quants, scale)
-    print(jnp.mean(jnp.abs(outputs - outputs_)), jnp.mean(jnp.abs(outputs_)))
-    number = 100
-    time_per_iter = timeit.timeit(lambda: matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel).block_until_ready(),
+    """
+    else:
+        timeit.template = """
+def inner(_it, _timer{init}):
+    {setup}
+    _t0 = _timer()
+    for _i in _it:
+        {stmt}
+    _t1 = _timer()
+    return _t1 - _t0
+    """
+    matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel, blocks=blocks).block_until_ready()
+    time_per_iter = timeit.timeit(lambda: matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel, blocks=blocks).block_until_ready(),
                                   number=number,) / number
-    print(f"Time: {time_per_iter:.4f}")
     max_flops = 275e12
     flops_in_matmul = a * b * c * 2
     mfu = flops_in_matmul / (time_per_iter * max_flops)
+    return mfu
+
+if __name__ == "__main__":
+    # x = jnp.arange(16, dtype=jnp.int32)
+    # print(nf4[x].tolist())
+    # print(nf4xf32_to_f32(x).tolist())
+    # print((nf4xf32_to_f32_eqmul(x) - nf4).tolist())
+    # print((nf4xf32_to_f32_select(x) - nf4).tolist())
+    # exit()
+    a, b, c, bs = 8192, 8192, 16384, 64
+    # a, b, c, bs = 2048, 2048, 2048, 64
+    quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs // 2, b), 0, 255, dtype=jnp.int8)
+    scale = jax.random.normal(jax.random.PRNGKey(1), (a // bs, 1, b), dtype=jnp.bfloat16) / 255
+    inputs = jax.random.normal(jax.random.PRNGKey(2), (c, a), dtype=jnp.bfloat16)
+    outputs = matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel)
+    outputs_ = inputs @ dequantize(quants, scale)
+    print(jnp.mean(jnp.abs(outputs - outputs_)), jnp.mean(jnp.abs(outputs_)))
+    mfu = time_mfu(100, verbose=True)
     print(f"MFU: {mfu:.2f}")
+    options = [256, 512, 1024, 2048, 4096]
+    import random
+    from tqdm.auto import tqdm
+    from itertools import product
+    options = list(product(options, options, options))
+    random.shuffle(options)
+    max_mfu = 0
+    best = None
+    failed = set()
+    for x, y, z in (bar := tqdm(options)):
+        group = (x, y, z)
+        for f in failed:
+            if all(f[i] < group[i] for i in range(3)):
+                continue
+        try:
+            mfu = time_mfu(10, group)
+        except Exception as e:
+            print(type(e))
+            failed.add(group)
+            mfu = 0
+        max_mfu, best = max((max_mfu, best), (mfu, group))
+        bar.set_postfix(max_mfu=max_mfu, best=best)
+    print(f"Best MFU: {max_mfu:.2f} with {best}")
     derivative = outputs / outputs.max()
     backwards = matmul_fast(derivative, quants, scale, kernel=matmul_nf4_kernel_transpose, backward=True)
