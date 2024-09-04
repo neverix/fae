@@ -133,6 +133,32 @@ def int4_matmul_mfu():
 
     return analyze_matmul
 
+def quant_2d():
+    x = jax.random.normal(jax.random.PRNGKey(0), (128, 128), dtype=jnp.float32)
+    d_1 = jnp.ones(x.shape[0], dtype=jnp.float32)
+    d_2 = jnp.ones(x.shape[1], dtype=jnp.float32)
+    # https://cerfacs.fr/wp-content/uploads/2017/06/14_DanielRuiz.pdf
+    # 2017 Daniel Ruiz "A scaling algorithm to equilibrate both rows and columns norms in matrices"
+    # scaling, huh?
+    def update(_, state):
+        x, d_1, d_2 = state
+        d_r = jnp.sqrt(jnp.abs(x).max(axis=1))
+        d_c = jnp.sqrt(jnp.abs(x).max(axis=0))
+        x = x / d_r[:, None] / d_c[None, :]
+        d_1 = d_1 / d_r
+        d_2 = d_2 / d_c
+        return x, d_1, d_2
+    x, d_1, d_2 = jax.lax.fori_loop(0, 100, update, (x, d_1, d_2))
+    plt.subplot(221)
+    plt.imshow(x)
+    plt.colorbar()
+    plt.subplot(222)
+    plt.hist(d_1)
+    plt.subplot(223)
+    plt.hist(d_2)
+    plt.subplot(224)
+    plt.hist(x.ravel(), bins=100)
+    plt.savefig("misc/2quant.png")
+
 if __name__ == "__main__":
-    analyze_matmul = int4_matmul_mfu()
-    analyze_matmul(2048, 512, 256, np.bfloat16, np.int4)
+    pass
