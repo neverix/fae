@@ -349,7 +349,7 @@ if __name__ == "__main__":
     # print(nf4xf32_to_f32(x).tolist())
     # print((nf4xf32_to_f32_eqmul(x) - nf4).tolist())
     # print((nf4xf32_to_f32_select(x) - nf4).tolist())
-    # exit()
+
     a, b, c, bs = 8192, 8192, 16384, 64
     # a, b, c, bs = 2048, 2048, 2048, 64
     quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs, b), -128, 127, dtype=jnp.int8).astype(jnp.int4)
