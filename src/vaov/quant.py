@@ -150,7 +150,8 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
     # tensors = [t.view(jnp.int8) if t.dtype == jnp.uint8 else t for t in tensors]
 
     if not backward:
-        block_x, block_y, block_k = 512, 512, 1024
+        # block_x, block_y, block_k = 1024, 512, 1024  # 55%
+        block_x, block_y, block_k = 2048, 512, 512  # 61%
     else:
         # block_x, block_y, block_k = 256, 1024, 256
         block_x, block_y, block_k = 256, 256, 512
