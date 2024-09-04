@@ -31,8 +31,61 @@ nf4 = jnp.asarray(
         1.0,
     ]
 )
-def nf4xf32_to_f32(x):
+
+def to_nf4_8_hi(x):
+    # if 1:
+    #     # simulate 8-bit polynomial
+    #     x = ba(x, 0b11110000)
+    #     x = (
+    #         x * (x * (19 * x - 17) + 109) - 18
+    #     )
+    #     return x.astype(jnp.float32) / 127
+
+    x = x.astype(jnp.int32)
+    # x = jax.lax.div(x, 16)
+
+    # x = sr(x, 4)
+    # return nf4xf32_to_f32(x)
+
+    x = ba(x, 0b11110000)
+    return nf4xf32_to_f32(x, x_mul=1/16)
+
+def to_nf4_8_lo(x):
+    # if 1:
+    #     # simulate 8-bit polynomial
+    #     x = ba(x, 0b1111)
+    #     x = x * (x * (19 * x - 17) + 109) - 18
+    #     return x.astype(jnp.float32) / 127
+
+    x = x.astype(jnp.int32)
+    x = ba(x, 0b1111)
+    # x = sr(sl(x, 4), 4)
+    return nf4xf32_to_f32(x)
+
+def nf4xf32_to_f32(x, x_mul=1.0):
     x = x.astype(jnp.float32)
+
+    # if x_mul == 1/16:
+    #     # simulate constant folding
+    #     return (
+    #         x
+    #         * (
+    #             x
+    #             * (
+    #                 x
+    #                 * (
+    #                     x * (1.82943132356953e-5 * x - 0.00068587779130373)
+    #                     + 0.0100420261313669
+    #                 )
+    #                 - 0.0722703570217226
+    #             )
+    #             + 0.346075459755188
+    #         )
+    #         - 0.994166218659335
+    #     )
+    if x_mul != 1.0:
+        x *= x_mul
+    # return x * 0.01 - 1
     return (
         x
         * (
@@ -246,17 +299,19 @@ def matmul_nf4_kernel(
 
         # to_nf4 = nf4xf32_to_f32_select
         # to_nf4 = nf4xf32_to_f32_eqmul
-        to_nf4 = nf4xf32_to_f32
+        # to_nf4 = nf4xf32_to_f32
         assert quants.dtype == jnp.int8
 
-        # quants = quants.view(jnp.uint8).astype(jnp.uint32).astype(jnp.int32)
-        quants = quants.astype(jnp.int32)
-        # quants = quants.astype(jnp.int16)
-        quants = i8tou8(quants)
+        w1 = to_nf4_8_hi(quants) * scale
+        w2 = to_nf4_8_lo(quants) * scale
+        # # quants = quants.view(jnp.uint8).astype(jnp.uint32).astype(jnp.int32)
+        # quants = quants.astype(jnp.int32)
+        # # quants = quants.astype(jnp.int16)
+        # quants = i8tou8(quants)
 
-        # within 1 byte
-        w1 = to_nf4(sr(quants, 4)) * scale
-        w2 = to_nf4(ba(quants, 0b1111)) * scale
+        # # within 1 byte
+        # w1 = to_nf4(sr(quants, 4)) * scale
+        # w2 = to_nf4(ba(quants, 0b1111)) * scale
 
         # i = inputs.shape[-1] // 2
         i = block_k // 2
