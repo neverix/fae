@@ -151,7 +151,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
 
     if not backward:
         # block_x, block_y, block_k = 1024, 512, 1024  # 55%
-        block_x, block_y, block_k = 2048, 512, 512  # 61%
+        block_x, block_y, block_k = 2048, 512, 512  # 56%
     else:
         # block_x, block_y, block_k = 256, 1024, 256
         block_x, block_y, block_k = 256, 256, 512
@@ -210,19 +210,24 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
         inputs_split = (not backward) and (not inputs_32)
 
         inputs_dtype = inputs.dtype
+        grid = ceil(inputs.shape[0] / block_x), ceil(y / block_y), ceil(k / block_k)
         if inputs_32:
             inputs = inputs.view(jnp.int32)
         elif inputs_split:
             og_shape = inputs.shape
-            inputs = inputs.reshape(inputs.shape[0], -1, block_k // 2, 2)
-            inputs = inputs.mT.reshape(og_shape)
-        grid = ceil(inputs.shape[0] / block_x), ceil(y / block_y), ceil(k / block_k)
+            inputs = inputs.reshape(inputs.shape[0], -1, 2)
+            inputs1 = inputs[..., 0].reshape(og_shape[0], -1)
+            inputs2 = inputs[..., 1].reshape(og_shape[0], -1)
+            # inputs = inputs.mT.reshape(og_shape)
         grid_spec = pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             grid=grid,
-            in_specs=[
+            in_specs=([
                 pl.BlockSpec(lambda i, j, k: (i, k), (block_x, block_k)),
-            ]
+            ] if not inputs_split else [
+                pl.BlockSpec(lambda i, j, k: (i, k), (block_x, block_k // 2)),
+                pl.BlockSpec(lambda i, j, k: (i, k), (block_x, block_k // 2)),
+            ])
             + [
                 pl.BlockSpec(
                     lambda i, j, k: (k, 0, j),
@@ -249,7 +254,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
                 mosaic=dict(dimension_semantics=("parallel", "parallel", "arbitrary"))
             ),
             interpret=False,
-        )(inputs, *tensors)
+        )(*((inputs,) if not inputs_split else (inputs1, inputs2)), *tensors)
         if backward:
             outputs = outputs.reshape(outputs.shape[0], -1, 2, block_y // 2).mT.reshape(
                 outputs.shape
@@ -278,7 +283,7 @@ def bf16_to_f32(x):
 
 int32_mask = int(jnp.array(0xFFFF0000, dtype=jnp.uint32).view(jnp.int32))
 def matmul_nf4_kernel(
-    inputs_ref, quants_ref, scale_ref, outputs_ref, accum_ref,
+    inputs1_ref, inputs2_ref, quants_ref, scale_ref, outputs_ref, accum_ref,
     *, block_k, inputs_split=False
 ):
     @pl.when(pl.program_id(axis=2) == 0)
@@ -310,14 +315,8 @@ def matmul_nf4_kernel(
     # inputs_ = inputs.view(jnp.int32)
 
     if inputs_split:
-        inputs1 = pl.load(
-            inputs_ref,
-            (slice(None), pl.dslice(0, block_k // 2)),
-        )
-        inputs2 = pl.load(
-            inputs_ref,
-            (slice(None), pl.dslice((block_k // 2) // 128 * 128, block_k // 2)),
-        )
+        inputs1 = inputs1_ref[...]
+        inputs2 = inputs2_ref[...]
     else:
         raise NotImplementedError
         # inputs = pl.load(
