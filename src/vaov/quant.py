@@ -138,6 +138,10 @@ def i8tou8(x):
     # return jnp.where(x < 0, 0, x)
 
 
+def i4tou4(x):
+    return jnp.where(x < 0, 16 + x, x)
+
+
 @partial(jax.jit, static_argnames=("kernel", "backward", "blocks"))
 def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
     weight_transpose = backward
@@ -163,9 +167,9 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
     if not weight_transpose:
         # tensor 0 is special and is fullest
         y = tensors[0].shape[2]
-        quant_group_size = tensors[0].shape[1] * 2
+        quant_group_size = tensors[0].shape[1]
     else:
-        quant_group_size = tensors[0].shape[1] * 2
+        quant_group_size = tensors[0].shape[1]
         y = quant_group_size * tensors[0].shape[0]
 
     x = inputs.shape[0]
@@ -217,9 +221,10 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
         if inputs_32:
             inputs = inputs.view(jnp.int32)
         elif inputs_split:
-            og_shape = inputs.shape
-            inputs = inputs.reshape(inputs.shape[0], -1, block_k // 2, 2)
-            inputs = inputs.mT.reshape(og_shape)
+            pass
+            # og_shape = inputs.shape
+            # inputs = inputs.reshape(inputs.shape[0], -1, block_k // 2, 2)
+            # inputs = inputs.mT.reshape(og_shape)
         grid = ceil(inputs.shape[0] / block_x), ceil(y / block_y), ceil(k / block_k)
         grid_spec = pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
@@ -289,17 +294,12 @@ def matmul_nf4_kernel(
     def _():
         accum_ref[...] = jnp.zeros_like(accum_ref)
 
-    if inputs_split:
-        assert block_k // 2 >= 128
-
 
     quants = quants_ref[...]
     scale = scale_ref[...]
 
-    assert quants.dtype == jnp.int8
-
-    w1 = to_nf4_8_hi(quants) * scale
-    w2 = to_nf4_8_lo(quants) * scale
+    quants = i4tou4(quants.astype(jnp.int32))
+    w1 = nf4xf32_to_f32(quants) * scale
     # # quants = quants.view(jnp.uint8).astype(jnp.uint32).astype(jnp.int32)
     # quants = quants.astype(jnp.int32)
     # # quants = quants.astype(jnp.int16)
@@ -310,18 +310,20 @@ def matmul_nf4_kernel(
     # w2 = to_nf4(ba(quants, 0b1111)) * scale
 
     # i = inputs.shape[-1] // 2
-    i = block_k // 2
+    # i = block_k // 2
+    i = block_k
     # inputs_ = inputs.view(jnp.int32)
 
     if inputs_split:
-        inputs1 = pl.load(
-            inputs_ref,
-            (slice(None), pl.dslice(0, block_k // 2)),
-        )
-        inputs2 = pl.load(
-            inputs_ref,
-            (slice(None), pl.dslice((block_k // 2) // 128 * 128, block_k // 2)),
-        )
+        # inputs1 = pl.load(
+        #     inputs_ref,
+        #     (slice(None), pl.dslice(0, block_k // 2)),
+        # )
+        # inputs2 = pl.load(
+        #     inputs_ref,
+        #     (slice(None), pl.dslice((block_k // 2) // 128 * 128, block_k // 2)),
+        # )
+        inputs = inputs_ref[...]
     else:
         raise NotImplementedError
         # inputs = pl.load(
@@ -333,8 +335,9 @@ def matmul_nf4_kernel(
         # inputs1 = sl(inputs1, 16).view(jnp.float32)
         # inputs2 = ba(inputs, int32_mask).view(jnp.float32)
     
-    accum_ref[...] += jnp.dot(inputs1, w1.reshape(i, -1), preferred_element_type=jnp.float32)
-    accum_ref[...] += jnp.dot(inputs2, w2.reshape(i, -1), preferred_element_type=jnp.float32)
+    accum_ref[...] += jnp.dot(inputs, w1.reshape(i, -1), preferred_element_type=jnp.float32)
+    # accum_ref[...] += jnp.dot(inputs1, w1.reshape(i, -1), preferred_element_type=jnp.float32)
+    # accum_ref[...] += jnp.dot(inputs2, w2.reshape(i, -1), preferred_element_type=jnp.float32)
     
     @pl.when(pl.program_id(axis=2) == (pl.num_programs(axis=2) - 1))
     def _():
@@ -365,7 +368,6 @@ def matmul_nf4_kernel_transpose(
         )
 
         to_nf4 = nf4xf32_to_f32
-        assert quants.dtype == jnp.int8
 
         quants = quants.astype(jnp.int32)
         quants = i8tou8(quants)
@@ -387,20 +389,12 @@ def matmul_nf4_kernel_transpose(
 
 
 def dequantize_group(group, scale, codebook, orig_dtype):
-    group = i8tou8(group.astype(np.int32))
-    high = sr(group, jnp.full_like(group, 4))
-    low = group & 0xF
+    group = i4tou4(group.astype(np.int32))
 
     codebook = codebook.astype(orig_dtype)
 
-    # high_vals = codebook[high]
-    # low_vals = codebook[low]
-    # high_vals = nf4xf32_to_f32_eqmul(high)
-    # low_vals = nf4xf32_to_f32_eqmul(low)
-    high_vals = nf4xf32_to_f32_select(high)
-    low_vals = nf4xf32_to_f32_select(low)
+    stacked = nf4xf32_to_f32_select(group)
 
-    stacked = jnp.stack([high_vals, low_vals], axis=-1)
     return (stacked * scale).reshape(-1)
 
 def dequantize(quants, scales):
@@ -408,6 +402,7 @@ def dequantize(quants, scales):
 
     half_group_size = quants.shape[1]
 
+    quants = quants.astype(np.int32)
     grouped = quants.transpose(2, 0, 1).reshape(-1, half_group_size)
     scales = scales.transpose(2, 0, 1).reshape(-1)
 
@@ -459,7 +454,7 @@ if __name__ == "__main__":
     # exit()
     a, b, c, bs = 8192, 8192, 16384, 64
     # a, b, c, bs = 2048, 2048, 2048, 64
-    quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs // 2, b), 0, 255, dtype=jnp.int8)
+    quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs, b), -128, 127, dtype=jnp.int8).astype(jnp.int4)
     scale = jax.random.normal(jax.random.PRNGKey(1), (a // bs, 1, b), dtype=jnp.bfloat16) / 255
     inputs = jax.random.normal(jax.random.PRNGKey(2), (c, a), dtype=jnp.bfloat16)
     outputs = matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel)
@@ -467,6 +462,8 @@ if __name__ == "__main__":
     print(jnp.mean(jnp.abs(outputs - outputs_)), jnp.mean(jnp.abs(outputs_)))
     mfu = time_mfu(100, verbose=True)
     print(f"MFU: {mfu:.2f}")
+    exit()
+
     options = [256, 512, 1024, 2048, 4096]
     import random
     from tqdm.auto import tqdm
