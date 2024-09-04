@@ -88,7 +88,7 @@ def i8tou8(x):
 @partial(jax.jit, static_argnames=("kernel", "backward"))
 def matmul_fast(inputs, *tensors, kernel, backward=False):
     weight_transpose = backward
-    inputs_32 = not backward
+    inputs_32 = False
 
     inputs = inputs.astype(jnp.bfloat16)
     tensors = [
@@ -152,9 +152,16 @@ def matmul_fast(inputs, *tensors, kernel, backward=False):
         assert inputs.shape[1] == tensors[0].shape[2]
 
     def kernel_call(inputs, *tensors):
+        nonlocal kernel
+        inputs_split = not backward and not inputs_32
+        if not backward:
+            kernel = partial(kernel, inputs_split=inputs_split)
+
         inputs_dtype = inputs.dtype
         if inputs_32:
             inputs = inputs.view(jnp.int32)
+        elif inputs_split:
+            inputs = inputs.reshape(inputs.shape[0], -1, 2).mT.reshape(inputs.shape)
         grid = ceil(inputs.shape[0] / block_x), ceil(y / block_y)
         grid_spec = pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
@@ -213,21 +220,19 @@ def bf16_to_f32(x):
 
 int32_mask = int(jnp.array(0xFFFF0000, dtype=jnp.uint32).view(jnp.int32))
 def matmul_nf4_kernel(
-    inputs_ref, quants_ref, scale_ref, outputs_ref, accum_ref, *, block_k
+    inputs_ref, quants_ref, scale_ref, outputs_ref, accum_ref,
+    *, block_k, inputs_split=False
 ):
     quant_group_size = quants_ref.shape[1] * 2
 
     accum_ref[...] = jnp.zeros_like(accum_ref)
 
     block_group = block_k // quant_group_size
+    k = inputs_ref.shape[-1]
+    half_k = k // 2
     loop_iterations = max(1, inputs_ref.shape[-1] * 2 // block_k)
 
     def matmul_loop(iteration, _):
-        inputs = pl.load(
-            inputs_ref,
-            (slice(None), pl.dslice((iteration * (block_k // 2)), block_k // 2)),
-        )
-
         quants = pl.load(
             quants_ref,
             (pl.dslice(iteration * block_group, block_group), slice(None), slice(None)),
@@ -255,10 +260,24 @@ def matmul_nf4_kernel(
         i = block_k // 2
         # inputs_ = inputs.view(jnp.int32)
 
-        # little-endian!
-        inputs1 = ba(inputs, 0xFFFF)
-        inputs1 = sl(inputs1, 16).view(jnp.float32)
-        inputs2 = ba(inputs, int32_mask).view(jnp.float32)
+        if inputs_split:
+            inputs1 = pl.load(
+                inputs_ref,
+                (slice(None), pl.dslice((iteration * (block_k // 2)), block_k // 2)),
+            )
+            inputs2 = pl.load(
+                inputs_ref,
+                (slice(None), pl.dslice((iteration * (block_k // 2)) + half_k, block_k // 2)),
+            )
+        else:
+            inputs = pl.load(
+                inputs_ref,
+                (slice(None), pl.dslice((iteration * (block_k // 2)), block_k // 2)),
+            )
+            # little-endian!
+            inputs1 = ba(inputs, 0xFFFF)
+            inputs1 = sl(inputs1, 16).view(jnp.float32)
+            inputs2 = ba(inputs, int32_mask).view(jnp.float32)
         
         accum_ref[...] += inputs1 @ w1.reshape(i, -1)
         accum_ref[...] += inputs2 @ w2.reshape(i, -1)
