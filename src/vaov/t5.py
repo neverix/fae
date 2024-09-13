@@ -1,82 +1,83 @@
-from collections.abc import Sequence
-import enum
-import functools
-import inspect
-import itertools
-import logging
-import os
-import re
-from typing import Any, Callable, Iterator, Optional, Tuple, Union
-
-import numpy as np
-from jax.experimental import multihost_utils
+from transformers import FlaxAutoModelForSeq2SeqLM, FlaxT5EncoderModel, AutoTokenizer
+import jax.numpy as jnp
 import jax
-from jax import random
+import qax
 
-import t5.data
+from .quant import quantize_matrix, QuantMatrix
 
-from t5x.examples.t5 import network
-import t5x
-from t5x import models
-from t5x import partitioning
-from t5x import trainer as trainer_lib
-from t5x import utils
-from t5x.infer import _extract_tokens_and_aux_values
-from t5x.infer import _Inferences
-from t5x.interactive_model import InteractiveModel
-from t5x.interactive_model import get_batches_from_seqio
-from t5x.interactive_model import get_dataset_from_natural_text_examples
-from t5x.interactive_model import get_gin_config_from_interactive_model
-from t5x.interactive_model import T5XScriptType
-from t5x.interactive_model import InferenceType
+jit_quantize = jax.jit(quantize_matrix, static_argnames=("use_approx", "group_size"))
 
-t5_config = network.T5Config(
-    vocab_size=32128,
-    dtype="bfloat16",
-    emb_dim=4096,
-    num_heads=64,
-    num_encoder_layers=24,
-    num_decoder_layers=0,
-    head_dim=64,
-    mlp_dim=10240,
-    mlp_activations=("gelu", "linear"),
-    dropout_rate=0.0,
-    logits_via_embedding=False,
-)
-module = network.Transformer(config=t5_config)
-model = t5x.models.EncoderDecoderModel(
-    module=module,
-    input_vocabulary=t5.data.get_default_vocabulary(),
-    output_vocabulary=t5.data.get_default_vocabulary(),
-    optimizer_def=t5x.adafactor.Adafactor(decay_rate=0.8, step_offset=0),
-)
-# Define checkpoint arguments.
-checkpoint_path = "gs://t5-data/pretrained_models/t5.1.1.xxl/model.ckpt-1000000"
-dtype = "bfloat16"
 
-interactive_model = InteractiveModel(
-    batch_size=8,
-    task_feature_lengths={"inputs": 512, "targets": 0},
-    output_dir="/tmp/output_dir",
-    partitioner=partitioning.PjitPartitioner(
-        num_partitions=1,
-        model_parallel_submesh=None,
-        logical_axis_rules=partitioning.standard_logical_axis_rules(),
-    ),
-    model=model,
-    dtype="bfloat16",
-    restore_mode="specific",
-    checkpoint_path=checkpoint_path,
-    restore_strict=False,
-    input_shapes={
-        # "encoder_input_tokens": np.array([8, 38]),
-        # "decoder_target_tokens": np.array([8, 18]),
-        # "decoder_input_tokens": np.array([8, 18]),
-        # "decoder_loss_weights": np.array([8, 18]),
-        "encoder_input_tokens": np.array([8, 512]),
-        "decoder_target_tokens": np.array([8, 0]),
-        "decoder_input_tokens": np.array([8, 0]),
-        "decoder_loss_weights": np.array([8, 0]),
-    },
-    input_types=None,
-)
+def maybe_quantize(path, param):
+    if param.ndim != 2:
+        return param
+
+    if "embed" in jax.tree_util.keystr(path):
+        # Don't want to relative_attention_bias embedding
+        return param
+
+    # Avoid embedding tables/final projection
+    if any(d > 5000 for d in param.shape):
+        return param
+    return quantize_matrix(param, use_approx=True, group_size=32)
+
+
+def quantize_params_tree(params):
+    return jax.tree_util.tree_map_with_path(maybe_quantize, params)
+
+if __name__ == "__main__":
+    # with jax.default_device(jax.devices("cpu")[0]):
+    #     # model_name = "google/t5-v1_1-xxl"
+    #     # model = FlaxT5EncoderModel.from_pretrained(model_name, from_pt=True)
+    #     # model.params = jax.tree.map(lambda x: x.astype(jnp.bfloat16), model.params)
+    #     # model.save_pretrained("t5-v1_1-xxl-flax", params=model.params, push_to_hub=True)
+    #     tokenizer = AutoTokenizer.from_pretrained("google/t5-v1_1-xxl")
+    #     tokenizer.save_pretrained("t5-v1_1-xxl-flax", push_to_hub=True)
+    # exit()
+
+    model_name = "nev/t5-v1_1-xxl-flax"
+    model, params = FlaxT5EncoderModel.from_pretrained(model_name, _do_init=False, dtype=jnp.bfloat16)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    quantized_params = quantize_params_tree(params)
+    params = jax.device_put_replicated(params, jax.devices("tpu"))
+    wrapped_model = jax.jit(qax.use_implicit_args(model.__call__))
+
+
+    def set_use_kernel(tree, value):
+        def op(x):
+            if isinstance(x, QuantMatrix):
+                x.use_kernel = value
+
+        jax.tree.map(op, tree, is_leaf=lambda x: isinstance(x, QuantMatrix))
+
+
+    input = "The color of the sky is: "
+    encoder_input = jnp.asarray(tokenizer.encode(input), dtype=jnp.int32)[None]
+    decoder_start = jnp.asarray([[tokenizer.pad_token_id]], dtype=jnp.int32)
+
+    encoder_input = encoder_input
+    decoder_start = decoder_start
+
+    # kwargs = {"input_ids": encoder_input, "attention_mask": encoder_mask, "decoder_input_ids": decoder_start, "decoder_attention_mask": decoder_mask}
+    # kwargs = {"input_ids": encoder_input, "decoder_input_ids": decoder_start}
+    kwargs = {"input_ids": encoder_input}
+    set_use_kernel(quantized_params, True)
+    quantized_logits = wrapped_model(params=quantized_params, **kwargs)
+    set_use_kernel(quantized_params, False)
+    quantized_logits_no_kernel = wrapped_model(params=quantized_params, **kwargs)
+    # base_logits                = wrapped_model(params=params, **kwargs).logits
+    exit()
+
+    print(f"Input: {input}")
+    # for (name, logits) in ("Original", base_logits), ("Quantized", quantized_logits), ("Quantized No Kernel", quantized_logits_no_kernel):
+    for name, logits in (
+        ("Quantized", quantized_logits),
+        ("Quantized No Kernel", quantized_logits_no_kernel),
+    ):
+        last_logits = logits[0][-1]
+        assert last_logits.ndim == 1
+        probs = jax.nn.softmax(last_logits)
+        top_probs, top_tokens = jax.lax.top_k(probs, 10)
+        print(f"{name} predictions")
+        for token, prob in zip(top_tokens, top_probs):
+            print(f"\t{tokenizer.convert_ids_to_tokens(int(token))}: {prob:.2%}")

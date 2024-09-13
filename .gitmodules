@@ -1,3 +1,0 @@
-[submodule "custom-t5x"]
-	path = custom-t5x
-	url = https://github.com/neverix/t5x

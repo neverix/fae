@@ -10,6 +10,7 @@ from functools import partial
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import PartitionSpec as P
+import qax
 
 
 nf4 = jnp.asarray(
@@ -51,6 +52,8 @@ def nf4xf32_to_f32(x):
         )
         - 0.994166218659335
     )
+
+approx_nf4 = nf4xf32_to_f32(jnp.arange(16))
 
 
 def nf4xf32_to_f32_eqmul(x):
@@ -311,6 +314,107 @@ def dequantize(quants, scales):
     unquant_matrix = dequantized_groups.reshape(quants.shape[2], -1).T
 
     return unquant_matrix
+
+@dataclass
+class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
+    quants: jnp.ndarray
+    scales: jnp.ndarray
+
+    use_approx: bool = qax.aux_field()
+    use_kernel: bool = qax.aux_field()
+    orig_dtype: jnp.dtype = qax.aux_field()
+
+    def __post_init__(self):
+        self.dtype = self.orig_dtype
+        self.shape = (
+            self.quants.shape[0] * self.quants.shape[1] * 2,
+            self.quants.shape[2],
+        )
+
+    def materialize(self):
+        if self.use_kernel:
+            # We should never materialize if we're trying to use the kernel
+            raise NotImplementedError
+
+        return self.dequantize()
+
+    def dequantize(self):
+        codebook = approx_nf4 if self.use_approx else nf4
+
+        half_group_size = self.quants.shape[1]
+
+        grouped = self.quants.transpose(2, 0, 1).reshape(-1, half_group_size)
+        scales = self.scales.transpose(2, 0, 1).reshape(-1)
+
+        dequantized_groups = jax.vmap(dequantize_group, in_axes=(0, 0, None, None))(
+            grouped, scales, codebook, self.orig_dtype
+        )
+
+        unquant_matrix = dequantized_groups.reshape(self.quants.shape[2], -1).T
+
+        return unquant_matrix
+
+
+@qax.primitive_handler("dot_general")
+def dot_general_handler(
+    primitive, a: jax.Array, b: QuantMatrix, *, dimension_numbers, **kwargs
+):
+    if not b.use_kernel:
+        return NotImplemented
+
+    (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dimension_numbers
+    if (
+        rhs_batch
+        or lhs_batch
+        or lhs_contract != (len(a.shape) - 1,)
+        or rhs_contract != (0,)
+    ):
+        # Fall back to materialization
+        return NotImplemented
+
+    if not b.use_approx:
+        # No kernel for NF4
+        return NotImplemented
+
+    # Reshape a to be 2-D
+    orig_a_shape = a.shape
+    a = a.reshape(-1, a.shape[-1])
+
+    # Call kernel
+    out = matmul_fast(a, b.quants, b.scales, kernel=matmul_nf4_kernel)
+    return out.reshape(*orig_a_shape[:-1], out.shape[-1])
+
+
+def quantize_groups(group, codebook):
+    scale = jnp.max(jnp.abs(group))
+    scaled = group / scale
+
+    errors = scaled[..., None] - codebook
+    code_vals = jnp.argmin(jnp.abs(errors), axis=-1).astype(jnp.uint8)
+    quants = (code_vals[..., ::2] << 4 | code_vals[..., 1::2]).view(jnp.int8)
+
+    return quants, scale
+
+
+def quantize_matrix(mat, use_approx, group_size=32):
+    transposed = mat.T
+    grouped = transposed.reshape(-1, group_size)
+
+    codebook = approx_nf4 if use_approx else nf4
+    quants, scales = jax.vmap(quantize_groups, in_axes=(0, None))(grouped, codebook)
+
+    quants = quants.reshape(mat.shape[-1], -1, group_size // 2)
+    quants = quants.transpose(1, 2, 0)
+    scales = scales.reshape(mat.shape[-1], -1, 1)
+    scales = scales.transpose(1, 2, 0)
+
+    return QuantMatrix(
+        quants=quants,
+        scales=scales,
+        use_approx=use_approx,
+        orig_dtype=mat.dtype,
+        use_kernel=True,
+    )
 
 def time_mfu(number=100, blocks=None, verbose=False):
     import timeit

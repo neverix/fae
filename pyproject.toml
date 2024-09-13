@@ -8,11 +8,14 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "equinox>=0.11.5",
+    "flax>=0.9.0",
     "jax[tpu]>=0.4.31",
     "libtpu-nightly",
     "matplotlib>=3.9.2",
-    "t5x[test]",
-    "tqdm>=4.66.5",
+    "qax>=0.3.1",
+    "sentencepiece>=0.2.0",
+    "torch>=2.4.1",
+    "transformers>=4.44.2",
 ]
 
 [build-system]
@@ -22,6 +25,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/vaov"]
 
+[tool.uv]
+extra-index-url = ["https://download.pytorch.org/whl/cpu"]
+index-strategy = "first-index"
+
 [tool.uv.sources]
-t5x = { path = "./custom-t5x" }
 libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20240729+default-py3-none-any.whl" }
+
