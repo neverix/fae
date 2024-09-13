@@ -161,4 +161,6 @@ def quant_2d():
     plt.savefig("misc/2quant.png")
 
 if __name__ == "__main__":
-    pass
+    record = int4_matmul_mfu()
+    record(2048, 256, 256, jnp.bfloat16, jnp.bfloat16)
+    record(2048, 256, 256, jnp.bfloat16, jnp.int4)

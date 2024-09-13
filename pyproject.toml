@@ -5,10 +5,13 @@ name = "vaov"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "equinox>=0.11.5",
+    "jax[tpu]>=0.4.31",
+    "libtpu-nightly",
     "matplotlib>=3.9.2",
+    "t5x[test]",
     "tqdm>=4.66.5",
 ]
 
@@ -18,3 +21,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vaov"]
+
+[tool.uv.sources]
+t5x = { git = "https://github.com/google-research/t5x" }
+libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20240729+default-py3-none-any.whl" }
