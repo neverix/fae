@@ -1843,7 +1843,7 @@ wheels = [
 [[package]]
 name = "t5x"
 version = "0.0.0"
-source = { git = "https://github.com/google-research/t5x#705247b743d26a33d0c058b41c72ad030e51891b" }
+source = { directory = "custom-t5x" }
 dependencies = [
     { name = "absl-py" },
     { name = "airio" },
@@ -1867,6 +1867,44 @@ dependencies = [
 test = [
     { name = "pytest" },
     { name = "t5" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "absl-py" },
+    { name = "airio", git = "https://github.com/google/airio" },
+    { name = "best-download", marker = "extra == 'gpu'", specifier = "==0.0.9" },
+    { name = "cached-property" },
+    { name = "clu", git = "https://github.com/google/CommonLoopUtils" },
+    { name = "dllogger", marker = "extra == 'gpu'", git = "https://github.com/NVIDIA/dllogger" },
+    { name = "fasttext", marker = "extra == 'gpu'", specifier = "==0.9.2" },
+    { name = "fiddle", specifier = ">=0.2.5" },
+    { name = "flax", git = "https://github.com/google/flax" },
+    { name = "gdown", marker = "extra == 'gpu'", specifier = "==4.5.3" },
+    { name = "gevent", marker = "extra == 'gcp'" },
+    { name = "gin-config" },
+    { name = "google-api-python-client", marker = "extra == 'gcp'" },
+    { name = "google-cloud-storage", marker = "extra == 'gcp'" },
+    { name = "google-compute-engine", marker = "extra == 'gcp'" },
+    { name = "ipdb", marker = "extra == 'gpu'", specifier = "==0.13.9" },
+    { name = "jax", specifier = ">=0.4.16" },
+    { name = "jax", extras = ["tpu"], marker = "extra == 'tpu'", specifier = ">=0.4.16" },
+    { name = "jaxlib", specifier = ">=0.4.16" },
+    { name = "jestimator", git = "https://github.com/google-research/jestimator" },
+    { name = "lm-dataformat", marker = "extra == 'gpu'", specifier = "==0.0.20" },
+    { name = "numpy" },
+    { name = "oauth2client", marker = "extra == 'gcp'" },
+    { name = "optax", git = "https://github.com/deepmind/optax" },
+    { name = "orbax-checkpoint", specifier = ">=0.5" },
+    { name = "pysimdjson", marker = "extra == 'gpu'", specifier = "==5.0.2" },
+    { name = "pytablewriter", marker = "extra == 'gpu'", specifier = "==0.64.2" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "seqio", git = "https://github.com/google/seqio" },
+    { name = "t5", marker = "extra == 'gpu'", specifier = "==0.9.4" },
+    { name = "t5", marker = "extra == 'test'" },
+    { name = "tensorflow-cpu" },
+    { name = "tensorstore", specifier = ">=0.1.20" },
+    { name = "tfds-nightly", marker = "extra == 'gpu'" },
 ]
 
 [[package]]
@@ -2292,7 +2330,7 @@ requires-dist = [
     { name = "jax", extras = ["tpu"], specifier = ">=0.4.31" },
     { name = "libtpu-nightly", url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20240729+default-py3-none-any.whl" },
     { name = "matplotlib", specifier = ">=3.9.2" },
-    { name = "t5x", extras = ["test"], git = "https://github.com/google-research/t5x" },
+    { name = "t5x", extras = ["test"], directory = "custom-t5x" },
     { name = "tqdm", specifier = ">=4.66.5" },
 ]
 

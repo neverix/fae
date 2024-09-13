@@ -23,5 +23,5 @@ build-backend = "hatchling.build"
 packages = ["src/vaov"]
 
 [tool.uv.sources]
-t5x = { git = "https://github.com/google-research/t5x" }
+t5x = { path = "./custom-t5x" }
 libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20240729+default-py3-none-any.whl" }

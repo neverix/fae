@@ -67,6 +67,7 @@ interactive_model = InteractiveModel(
     dtype="bfloat16",
     restore_mode="specific",
     checkpoint_path=checkpoint_path,
+    restore_strict=False,
     input_shapes={
         # "encoder_input_tokens": np.array([8, 38]),
         # "decoder_target_tokens": np.array([8, 18]),
