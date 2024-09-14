@@ -88,12 +88,16 @@ def i8tou8(x):
     return jnp.where(x < 0, 256 + x, x)
 
 
+def u4toi4(x):
+    return jnp.where(x >= 8, x - 16, x)
+
+
 def i4tou4(x):
     return jnp.where(x < 0, 16 + x, x)
 
 
 @partial(jax.jit, static_argnames=("kernel", "backward", "blocks"))
-def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
+def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):    
     weight_transpose = backward
 
     inputs = inputs.astype(jnp.bfloat16)
@@ -294,17 +298,18 @@ def dequantize_group(group, scale, codebook, orig_dtype):
 
     codebook = codebook.astype(orig_dtype)
 
-    stacked = nf4xf32_to_f32_select(group)
+    # stacked = nf4xf32_to_f32_select(group)
+    stacked = nf4xf32_to_f32(group)
 
     return (stacked * scale).reshape(-1)
 
 def dequantize(quants, scales):
     codebook = nf4
 
-    half_group_size = quants.shape[1]
+    group_size = quants.shape[1]
 
     quants = quants.astype(np.int32)
-    grouped = quants.transpose(2, 0, 1).reshape(-1, half_group_size)
+    grouped = quants.transpose(2, 0, 1).reshape(-1, group_size)
     scales = scales.transpose(2, 0, 1).reshape(-1)
 
     dequantized_groups = jax.vmap(dequantize_group, in_axes=(0, 0, None, None))(
@@ -327,7 +332,7 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
     def __post_init__(self):
         self.dtype = self.orig_dtype
         self.shape = (
-            self.quants.shape[0] * self.quants.shape[1] * 2,
+            self.quants.shape[0] * self.quants.shape[1],
             self.quants.shape[2],
         )
 
@@ -341,9 +346,9 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
     def dequantize(self):
         codebook = approx_nf4 if self.use_approx else nf4
 
-        half_group_size = self.quants.shape[1]
+        group_size = self.quants.shape[1]
 
-        grouped = self.quants.transpose(2, 0, 1).reshape(-1, half_group_size)
+        grouped = self.quants.transpose(2, 0, 1).reshape(-1, group_size)
         scales = self.scales.transpose(2, 0, 1).reshape(-1)
 
         dequantized_groups = jax.vmap(dequantize_group, in_axes=(0, 0, None, None))(
@@ -390,12 +395,11 @@ def quantize_groups(group, codebook):
     scaled = group / scale
 
     errors = scaled[..., None] - codebook
-    code_vals = jnp.argmin(jnp.abs(errors), axis=-1).astype(jnp.uint8)
-    quants = (code_vals[..., ::2] << 4 | code_vals[..., 1::2]).view(jnp.int8)
+    code_vals = jnp.argmin(jnp.abs(errors), axis=-1)
 
-    return quants, scale
+    return code_vals, scale
 
-
+# @partial(jax.jit, static_argnames=("use_approx", "group_size"))
 def quantize_matrix(mat, use_approx, group_size=32):
     transposed = mat.T
     grouped = transposed.reshape(-1, group_size)
@@ -403,8 +407,12 @@ def quantize_matrix(mat, use_approx, group_size=32):
     codebook = approx_nf4 if use_approx else nf4
     quants, scales = jax.vmap(quantize_groups, in_axes=(0, None))(grouped, codebook)
 
-    quants = quants.reshape(mat.shape[-1], -1, group_size // 2)
+    # int4 does not support reshape/transpose on CPU
+    quants = quants.reshape(mat.shape[-1], -1, group_size)
     quants = quants.transpose(1, 2, 0)
+    quants = u4toi4(quants)
+    # quants = quants.astype(jnp.int4)
+
     scales = scales.reshape(mat.shape[-1], -1, 1)
     scales = scales.transpose(1, 2, 0)
 
@@ -455,15 +463,28 @@ if __name__ == "__main__":
     # print((nf4xf32_to_f32_select(x) - nf4).tolist())
 
     a, b, c, bs = 8192, 8192, 16384, 64
-    # a, b, c, bs = 2048, 2048, 2048, 64
-    quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs, b), -128, 127, dtype=jnp.int8).astype(jnp.int4)
-    scale = jax.random.normal(jax.random.PRNGKey(1), (a // bs, 1, b), dtype=jnp.bfloat16) / 255
-    inputs = jax.random.normal(jax.random.PRNGKey(2), (c, a), dtype=jnp.bfloat16)
-    outputs = matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel)
-    outputs_ = inputs @ dequantize(quants, scale)
-    print(jnp.mean(jnp.abs(outputs - outputs_)), jnp.mean(jnp.abs(outputs_)))
-    mfu = time_mfu(100, verbose=True)
-    print(f"MFU: {mfu:.2f}")
+
+    inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
+    matrix = jax.random.normal(jax.random.key(1), (b, c), dtype=jnp.bfloat16)
+    
+    quant_matrix = quantize_matrix(matrix, use_approx=True)
+    
+    print(jnp.mean(jnp.abs(matrix - quant_matrix.dequantize())), jnp.mean(jnp.abs(matrix)))
+    
+    result = inputs @ matrix
+    # result_ = jax.jit(qax.use_implicit_args(jnp.dot))(inputs, quant_matrix)
+    result_ = inputs @ quant_matrix.dequantize()
+    print(jnp.mean(jnp.abs(result - result_)), jnp.mean(jnp.abs(result_)))
+
+    # # a, b, c, bs = 2048, 2048, 2048, 64
+    # quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs, b), -128, 127, dtype=jnp.int8).astype(jnp.int4)
+    # scale = jax.random.normal(jax.random.PRNGKey(1), (a // bs, 1, b), dtype=jnp.bfloat16) / 255
+    # inputs = jax.random.normal(jax.random.PRNGKey(2), (c, a), dtype=jnp.bfloat16)
+    # outputs = matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel)
+    # outputs_ = inputs @ dequantize(quants, scale)
+    # print(jnp.mean(jnp.abs(outputs - outputs_)), jnp.mean(jnp.abs(outputs_)))
+    # mfu = time_mfu(100, verbose=True)
+    # print(f"MFU: {mfu:.2f}")
 
     exit()
 
