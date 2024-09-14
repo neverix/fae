@@ -1,5 +1,6 @@
 from transformers import FlaxAutoModelForSeq2SeqLM, FlaxT5EncoderModel, AutoTokenizer
 import jax.numpy as jnp
+import numpy as np
 import jax
 import qax
 
@@ -17,7 +18,7 @@ def maybe_quantize(path, param):
         return param
 
     # Avoid embedding tables/final projection
-    if any(d > 5000 for d in param.shape):
+    if any(d > 9000 for d in param.shape):  #
         return param
     return quantize_matrix(param, use_approx=True, group_size=32)
 
@@ -39,7 +40,16 @@ if __name__ == "__main__":
     model, params = FlaxT5EncoderModel.from_pretrained(model_name, _do_init=False, dtype=jnp.bfloat16)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     quantized_params = quantize_params_tree(params)
-    params = jax.device_put_replicated(params, jax.devices("tpu"))
+    
+    # TODO add sharding to kernel
+    # basic shmap, could add the new RDMA-based interface
+
+    # mesh = jax.sharding.Mesh(np.asarray(jax.devices()).reshape(-1), ("dp",))
+    # sharding_tree = jax.tree.map(lambda x: jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*([None]*len(x.shape)))), quantized_params)
+    # quantized_params = jax.device_put(quantized_params, sharding_tree)
+
+    quantized_params = jax.device_put(quantized_params, jax.devices("tpu")[0])
+    
     wrapped_model = jax.jit(qax.use_implicit_args(model.__call__))
 
 
@@ -62,10 +72,19 @@ if __name__ == "__main__":
     # kwargs = {"input_ids": encoder_input, "decoder_input_ids": decoder_start}
     kwargs = {"input_ids": encoder_input}
     set_use_kernel(quantized_params, True)
-    quantized_logits = wrapped_model(params=quantized_params, **kwargs)
+    def visualize(params, quantized_params, cur_path=()):
+        for k, v in params.items():
+            if isinstance(v, dict):
+                visualize(v, quantized_params[k], cur_path + (k,))
+            else:
+                print(cur_path + (k,), v.shape, quantized_params[k].shape)  #, jnp.mean(jnp.abs(v - quantized_params[k].dequantize())))
+    visualize(params, quantized_params)
+    quantized_logits = wrapped_model(params=quantized_params, **kwargs).last_hidden_state
+    print(quantized_logits.keys())
     set_use_kernel(quantized_params, False)
-    quantized_logits_no_kernel = wrapped_model(params=quantized_params, **kwargs)
+    quantized_logits_no_kernel = wrapped_model(params=quantized_params, **kwargs).last_hidden_state
     # base_logits                = wrapped_model(params=params, **kwargs).logits
+    print(jnp.mean(jnp.abs(quantized_logits - quantized_logits_no_kernel)), jnp.mean(jnp.abs(quantized_logits_no_kernel)))
     exit()
 
     print(f"Input: {input}")
