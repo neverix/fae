@@ -1,7 +1,8 @@
+from typing import Optional, Tuple
 import jax
 import jaxlib
 from dataclasses import dataclass
-import jax.numpy as jnp
+import dataclasses
 import jax.numpy as jnp
 import numpy as np
 import jax
@@ -326,6 +327,8 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
     use_kernel: bool = qax.aux_field()
     orig_dtype: jnp.dtype = qax.aux_field()
 
+    mesh_and_axis: Optional[Tuple[jax.sharding.Mesh, Optional[int]]] = qax.aux_field()
+
     def __post_init__(self):
         self.dtype = self.orig_dtype
         self.shape = (
@@ -356,6 +359,19 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
 
         return unquant_matrix
 
+    @partial(jax.jit, static_argnames=("mesh_and_axis"))
+    def with_mesh_and_axis(self, mesh_and_axis):
+        new_quant_matrix = dataclasses.replace(self, mesh_and_axis=mesh_and_axis)
+        mesh, shard_axis = mesh_and_axis
+        if shard_axis == 0:
+            quant_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("tp", None, None))
+        elif shard_axis == 1:
+            quant_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "tp"))
+        elif shard_axis is None:
+            quant_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, None))
+        new_quant_matrix = jax.device_put(new_quant_matrix, quant_sharding)
+        return new_quant_matrix
+
 
 @qax.primitive_handler("dot_general")
 def dot_general_handler(
@@ -380,10 +396,27 @@ def dot_general_handler(
 
     # Reshape a to be 2-D
     orig_a_shape = a.shape
-    a = a.reshape(-1, a.shape[-1])
+    a = a.reshape(-1, b.shape[0])
 
-    # Call kernel
-    out = matmul_fast(a, b.quants, b.scales, kernel=matmul_nf4_kernel)
+    if b.mesh_and_axis is not None:
+        mesh, map_axis = b.mesh_and_axis
+        tensors = b.quants, b.scales
+        def matmul(inputs, *tensors):
+            outputs = matmul_fast(inputs, *tensors, kernel=matmul_nf4_kernel)
+            if map_axis == 0:
+                outputs = jax.lax.psum(outputs, axis_name="tp")
+            return outputs
+        out = jax.experimental.shard_map.shard_map(
+            matmul,
+            mesh=mesh,
+            in_specs=(
+                P("dp", "tp" if map_axis == 0 else None),
+            ) + tuple(P("tp" if map_axis == 0 else None, None, "tp" if map_axis == 1 else None) for _ in tensors),
+            out_specs=P("dp", "tp" if map_axis == 1 else None),
+            check_rep=False,  # No replication rule for pallas_call
+        )(a, *tensors)
+    else:
+        out = matmul_fast(a, b.quants, b.scales, kernel=matmul_nf4_kernel)
     return out.reshape(*orig_a_shape[:-1], out.shape[-1])
 
 
@@ -396,8 +429,8 @@ def quantize_groups(group, codebook):
 
     return code_vals, scale
 
-@partial(jax.jit, static_argnames=("use_approx", "group_size"))
-def quantize_matrix(mat, use_approx, group_size=32):
+@partial(jax.jit, static_argnames=("use_approx", "group_size", "mesh_and_axis"))
+def quantize_matrix(mat, use_approx, group_size=32, mesh_and_axis=None):
     transposed = mat.T
     grouped = transposed.reshape(-1, group_size)
 
@@ -419,6 +452,7 @@ def quantize_matrix(mat, use_approx, group_size=32):
         use_approx=use_approx,
         orig_dtype=mat.dtype,
         use_kernel=True,
+        mesh_and_axis=mesh_and_axis,
     )
 
 def time_mfu(number=100, blocks=None, verbose=False):
@@ -444,21 +478,27 @@ def inner(_it, _timer{init}):
     _t1 = _timer()
     return _t1 - _t0
     """
-    matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel, blocks=blocks).block_until_ready()
-    time_per_iter = timeit.timeit(lambda: matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel, blocks=blocks).block_until_ready(),
-                                  number=number,) / number
-    max_flops = 275e12
+    # clearer than jax.jit(qax.use_implicit_args(jnp.dot))
+    @jax.jit
+    @qax.use_implicit_args
+    def computation_jit(inputs, quant_matrix):
+        return inputs @ quant_matrix
+    def computation():
+        return computation_jit(inputs, quant_matrix).block_until_ready()
+    result = computation()
+    time_per_iter = timeit.timeit(computation, number=number,) / number
+    max_flops = 275e12 * len(jax.devices("tpu"))
     flops_in_matmul = a * b * c * 2
     mfu = flops_in_matmul / (time_per_iter * max_flops)
-    return mfu
+    return result, mfu
 
 
-@jax.jit
 def check_accuracy(inputs, matrix, quant_matrix):
     jax.debug.print("{x}, {y}", x=jnp.mean(jnp.abs(matrix - quant_matrix.dequantize())), y=jnp.mean(jnp.abs(matrix)))
     result = inputs @ matrix
     result_ = inputs @ quant_matrix.dequantize()
     jax.debug.print("{x}, {y}", x=jnp.mean(jnp.abs(result - result_)), y=jnp.mean(jnp.abs(result_)))
+    return result_
 
 
 if __name__ == "__main__":
@@ -468,42 +508,29 @@ if __name__ == "__main__":
     # print((nf4xf32_to_f32_eqmul(x) - nf4).tolist())
     # print((nf4xf32_to_f32_select(x) - nf4).tolist())
 
-    a, b, c = 16384, 4096, 4096
-
-    inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
-    matrix = jax.random.normal(jax.random.key(1), (b, c), dtype=jnp.bfloat16)
+    a, b, c = 2**16, 2**15, 2**13
     
+    mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, -1), ("dp", "tp"))
+
+    with jax.default_device(jax.devices("cpu")[0]):
+        inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
+        matrix = jax.random.normal(jax.random.key(1), (b, c), dtype=jnp.bfloat16)
+
     quant_matrix = quantize_matrix(matrix, use_approx=True)
-    check_accuracy(inputs, matrix, quant_matrix)
+    result = check_accuracy(inputs, matrix, quant_matrix)
+    shard_axis = 0
+    for shard_axis in (0, 1, None):
+        quant_matrix = quant_matrix.with_mesh_and_axis((mesh, shard_axis))
+        if shard_axis == 0:
+            input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "tp"))
+        else:
+            input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", None))
+        inputs = jax.device_put(inputs, input_sharding)
 
-    quants = quant_matrix.quants
-    scale = quant_matrix.scales
-    mfu = time_mfu(100, verbose=True)
-    print(f"MFU: {mfu:.2f}")
+        inputs = jax.block_until_ready(inputs)
+        quant_matrix = jax.block_until_ready(quant_matrix)
 
-    exit()
-
-    options = [256, 512, 1024, 2048, 4096]
-    import random
-    from tqdm.auto import tqdm
-    from itertools import product
-    options = list(product(options, options, options))
-    random.shuffle(options)
-    max_mfu = -1
-    best = (0, 0, 0)
-    failed = set()
-    for x, y, z in (bar := tqdm(options)):
-        group = (x, y, z)
-        for f in failed:
-            if all(f[i] < group[i] for i in range(3)):
-                continue
-        try:
-            mfu = time_mfu(10, group)
-        except jaxlib.xla_extension.XlaRuntimeError:
-            failed.add(group)
-            mfu = 0
-        max_mfu, best = max((max_mfu, best), (mfu, group))
-        bar.set_postfix(max_mfu=max_mfu, best=best)
-    print(f"Best MFU: {max_mfu:.2f} with {best}")
-    derivative = outputs / outputs.max()
-    backwards = matmul_fast(derivative, quants, scale, kernel=matmul_nf4_kernel_transpose, backward=True)
+        result_, mfu = time_mfu(100, verbose=True)
+        print(f"Shard axis {shard_axis}")
+        print("", f"MFU: {mfu:.2f}")
+        print("", "Accuracy:", jnp.mean(jnp.abs(result - result_)), jnp.mean(jnp.abs(result)))
