@@ -108,8 +108,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
 
     if blocks is None:
         if not backward:
-            # block_x, block_y, block_k = 4096, 256, 256  # 78%
-            block_x, block_y, block_k = 2048, 512, 512 # 82.9%
+            block_x, block_y, block_k = 2048, 512, 512 # 78%
         else:
             # block_x, block_y, block_k = 256, 1024, 256
             block_x, block_y, block_k = 256, 256, 512
@@ -137,11 +136,9 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
     k_pad = (block_k - k) % block_k
     if x_pad or k_pad:
         inputs = jnp.pad(
-            inputs.reshape(inputs.shape[0] // x, x, -1, k),
-            ((0, 0), (0, x_pad), (0, 0), (0, k_pad)),
+            inputs.reshape(x, k),
+            ((0, x_pad), (0, k_pad)),
         )
-        inputs = inputs.reshape(-1, *inputs.shape[-2:])
-        inputs = inputs.reshape(inputs.shape[0], -1)
 
     y_pad = (block_y - y) % block_y
     if y_pad:
@@ -399,7 +396,7 @@ def quantize_groups(group, codebook):
 
     return code_vals, scale
 
-# @partial(jax.jit, static_argnames=("use_approx", "group_size"))
+@partial(jax.jit, static_argnames=("use_approx", "group_size"))
 def quantize_matrix(mat, use_approx, group_size=32):
     transposed = mat.T
     grouped = transposed.reshape(-1, group_size)
@@ -411,7 +408,7 @@ def quantize_matrix(mat, use_approx, group_size=32):
     quants = quants.reshape(mat.shape[-1], -1, group_size)
     quants = quants.transpose(1, 2, 0)
     quants = u4toi4(quants)
-    # quants = quants.astype(jnp.int4)
+    quants = quants.astype(jnp.int4)
 
     scales = scales.reshape(mat.shape[-1], -1, 1)
     scales = scales.transpose(1, 2, 0)
@@ -455,6 +452,15 @@ def inner(_it, _timer{init}):
     mfu = flops_in_matmul / (time_per_iter * max_flops)
     return mfu
 
+
+@jax.jit
+def check_accuracy(inputs, matrix, quant_matrix):
+    jax.debug.print("{x}, {y}", x=jnp.mean(jnp.abs(matrix - quant_matrix.dequantize())), y=jnp.mean(jnp.abs(matrix)))
+    result = inputs @ matrix
+    result_ = inputs @ quant_matrix.dequantize()
+    jax.debug.print("{x}, {y}", x=jnp.mean(jnp.abs(result - result_)), y=jnp.mean(jnp.abs(result_)))
+
+
 if __name__ == "__main__":
     # x = jnp.arange(16, dtype=jnp.int32)
     # print(nf4[x].tolist())
@@ -462,29 +468,18 @@ if __name__ == "__main__":
     # print((nf4xf32_to_f32_eqmul(x) - nf4).tolist())
     # print((nf4xf32_to_f32_select(x) - nf4).tolist())
 
-    a, b, c, bs = 8192, 8192, 16384, 64
+    a, b, c = 16384, 4096, 4096
 
     inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
     matrix = jax.random.normal(jax.random.key(1), (b, c), dtype=jnp.bfloat16)
     
     quant_matrix = quantize_matrix(matrix, use_approx=True)
-    
-    print(jnp.mean(jnp.abs(matrix - quant_matrix.dequantize())), jnp.mean(jnp.abs(matrix)))
-    
-    result = inputs @ matrix
-    # result_ = jax.jit(qax.use_implicit_args(jnp.dot))(inputs, quant_matrix)
-    result_ = inputs @ quant_matrix.dequantize()
-    print(jnp.mean(jnp.abs(result - result_)), jnp.mean(jnp.abs(result_)))
+    check_accuracy(inputs, matrix, quant_matrix)
 
-    # # a, b, c, bs = 2048, 2048, 2048, 64
-    # quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs, b), -128, 127, dtype=jnp.int8).astype(jnp.int4)
-    # scale = jax.random.normal(jax.random.PRNGKey(1), (a // bs, 1, b), dtype=jnp.bfloat16) / 255
-    # inputs = jax.random.normal(jax.random.PRNGKey(2), (c, a), dtype=jnp.bfloat16)
-    # outputs = matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel)
-    # outputs_ = inputs @ dequantize(quants, scale)
-    # print(jnp.mean(jnp.abs(outputs - outputs_)), jnp.mean(jnp.abs(outputs_)))
-    # mfu = time_mfu(100, verbose=True)
-    # print(f"MFU: {mfu:.2f}")
+    quants = quant_matrix.quants
+    scale = quant_matrix.scales
+    mfu = time_mfu(100, verbose=True)
+    print(f"MFU: {mfu:.2f}")
 
     exit()
 
