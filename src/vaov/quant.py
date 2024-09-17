@@ -510,7 +510,6 @@ if __name__ == "__main__":
 
     a, b, c = 2**16, 2**15, 2**13
     
-    mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, -1), ("dp", "tp"))
 
     with jax.default_device(jax.devices("cpu")[0]):
         inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
@@ -520,6 +519,11 @@ if __name__ == "__main__":
     result = check_accuracy(inputs, matrix, quant_matrix)
     shard_axis = 0
     for shard_axis in (0, 1, None):
+        # testing FSDP-like weight replication/sharding
+        if shard_axis is not None:
+            mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, -1), ("dp", "tp"))
+        else:
+            mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(-1, 1), ("dp", "tp"))
         quant_matrix = quant_matrix.with_mesh_and_axis((mesh, shard_axis))
         if shard_axis == 0:
             input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "tp"))
