@@ -368,7 +368,7 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
         elif shard_axis == 1:
             quant_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "tp"))
         elif shard_axis is None:
-            quant_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, None))
+            quant_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "fsdp"))
         new_quant_matrix = jax.device_put(new_quant_matrix, quant_sharding)
         return new_quant_matrix
 
@@ -394,28 +394,78 @@ def dot_general_handler(
         # No kernel for NF4
         return NotImplemented
 
-    # Reshape a to be 2-D
-    orig_a_shape = a.shape
-    a = a.reshape(-1, b.shape[0])
 
     if b.mesh_and_axis is not None:
         mesh, map_axis = b.mesh_and_axis
         tensors = b.quants, b.scales
-        def matmul(inputs, *tensors):
-            outputs = matmul_fast(inputs, *tensors, kernel=matmul_nf4_kernel)
-            if map_axis == 0:
-                outputs = jax.lax.psum(outputs, axis_name="tp")
-            return outputs
-        out = jax.experimental.shard_map.shard_map(
-            matmul,
-            mesh=mesh,
-            in_specs=(
-                P("dp", "tp" if map_axis == 0 else None),
-            ) + tuple(P("tp" if map_axis == 0 else None, None, "tp" if map_axis == 1 else None) for _ in tensors),
-            out_specs=P("dp", "tp" if map_axis == 1 else None),
-            check_rep=False,  # No replication rule for pallas_call
-        )(a, *tensors)
+        # Reshape a to be 3-D
+        orig_a_shape = a.shape
+        a = a.reshape(-1, a.shape[-2], a.shape[-1])
+        if map_axis in (0, 1):
+            def matmul(inputs, *tensors):
+                orig_inputs_shape = inputs.shape
+                inputs = inputs.reshape(-1, inputs.shape[-1])
+                outputs = matmul_fast(inputs, *tensors, kernel=matmul_nf4_kernel)
+                outputs = outputs.reshape(*orig_inputs_shape[:-1], outputs.shape[-1])
+                if map_axis == 0:
+                    outputs = jax.lax.psum(outputs, axis_name="tp")
+                return outputs
+            out = jax.experimental.shard_map.shard_map(
+                matmul,
+                mesh=mesh,
+                in_specs=(
+                    P("dp", "fsdp", "tp" if map_axis == 0 else None),
+                ) + tuple(P("tp" if map_axis == 0 else None, None, "tp" if map_axis == 1 else None) for _ in tensors),
+                out_specs=P("dp", "fsdp", "tp" if map_axis == 1 else None),
+                check_rep=False,  # No replication rule for pallas_call
+            )(a, *tensors)
+        else:
+            # https://jax.readthedocs.io/en/latest/jep/14273-shard-map.html#a-realistic-transformer-example
+            def matmul(inputs, *tensors):
+                axis_size = jax.lax.psum(1, axis_name="fsdp")
+                axis_index = jax.lax.axis_index(axis_name="fsdp")
+                
+                # outputs = matmul_fast(inputs, *tensors, kernel=matmul_nf4_kernel)
+                accum = jnp.zeros((inputs.shape[0], inputs.shape[1], b.shape[1]), dtype=inputs.dtype)
+                def loop_body(i, args):
+                    accum, inputs, tensors = args
+                    partial_result = matmul_fast(inputs.reshape(-1, inputs.shape[-1]), *tensors, kernel=matmul_nf4_kernel)
+                    partial_result = partial_result.reshape(*inputs.shape[:-1], -1)
+                    chunk_size = partial_result.shape[-1]
+                    accum = jax.lax.dynamic_update_slice(accum, partial_result, (0, 0, ((axis_index + i) % axis_size)*chunk_size))
+                    # inputs, tensors = jax.lax.ppermute(
+                    #     (inputs, tensors),
+                    #     axis_name="fsdp",
+                    #     perm=[(j, (j - 1) % axis_size) for j in range(axis_size)]
+                    # )
+                    tensors = jax.lax.ppermute(
+                        tensors,
+                        axis_name="fsdp",
+                        perm=[(j, (j - 1) % axis_size) for j in range(axis_size)]
+                    )
+                    return accum, inputs, tensors
+                accum, inputs, tensors = jax.lax.fori_loop(0, axis_size - 1, loop_body, (accum, inputs, tensors))
+                partial_result = matmul_fast(inputs.reshape(-1, inputs.shape[-1]), *tensors, kernel=matmul_nf4_kernel)
+                partial_result = partial_result.reshape(*inputs.shape[:-1], -1)
+                chunk_size = partial_result.shape[-1]
+                i = axis_size - 1
+                accum = jax.lax.dynamic_update_slice(accum, partial_result, (0, 0, ((axis_index + i) % axis_size)*chunk_size))
+                outputs = accum
+
+                return outputs
+            out = jax.experimental.shard_map.shard_map(
+                matmul,
+                mesh=mesh,
+                in_specs=(
+                    P("dp", "fsdp", None),
+                ) + tuple(P(None, None, "fsdp") for _ in tensors),
+                out_specs=P("dp", "fsdp", None),
+                check_rep=False,  # No replication rule for pallas_call
+            )(a, *tensors)
     else:
+        # Reshape a to be 2-D
+        orig_a_shape = a.shape
+        a = a.reshape(-1, b.shape[0])
         out = matmul_fast(a, b.quants, b.scales, kernel=matmul_nf4_kernel)
     return out.reshape(*orig_a_shape[:-1], out.shape[-1])
 
@@ -484,7 +534,7 @@ def inner(_it, _timer{init}):
     def computation_jit(inputs, quant_matrix):
         return inputs @ quant_matrix
     def computation():
-        return computation_jit(inputs, quant_matrix).block_until_ready()
+        return computation_jit(inputs_device, quant_matrix).block_until_ready()
     result = computation()
     time_per_iter = timeit.timeit(computation, number=number,) / number
     max_flops = 275e12 * len(jax.devices("tpu"))
@@ -518,23 +568,23 @@ if __name__ == "__main__":
     quant_matrix = quantize_matrix(matrix, use_approx=True)
     result = check_accuracy(inputs, matrix, quant_matrix)
     shard_axis = 0
-    for shard_axis in (0, 1, None):
+    for shard_axis in (None, 0, 1):
         # testing FSDP-like weight replication/sharding
         if shard_axis is not None:
-            mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, -1), ("dp", "tp"))
+            mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, 1, -1), ("dp", "fsdp", "tp"))
         else:
-            mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(-1, 1), ("dp", "tp"))
+            mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, -1, 1), ("dp", "fsdp", "tp"))
         quant_matrix = quant_matrix.with_mesh_and_axis((mesh, shard_axis))
         if shard_axis == 0:
-            input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "tp"))
+            input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", "tp"))
         else:
-            input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", None))
-        inputs = jax.device_put(inputs, input_sharding)
+            input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", None))
+        inputs_device = jax.device_put(inputs.reshape(-1, 64, inputs.shape[-1]), input_sharding)
 
-        inputs = jax.block_until_ready(inputs)
+        inputs_device = jax.block_until_ready(inputs_device)
         quant_matrix = jax.block_until_ready(quant_matrix)
 
         result_, mfu = time_mfu(100, verbose=True)
         print(f"Shard axis {shard_axis}")
         print("", f"MFU: {mfu:.2f}")
-        print("", "Accuracy:", jnp.mean(jnp.abs(result - result_)), jnp.mean(jnp.abs(result)))
+        print("", "Accuracy:", jnp.mean(jnp.abs(result - result_.reshape(result.shape))), jnp.mean(jnp.abs(result)))
