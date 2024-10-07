@@ -359,7 +359,7 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
 
         return unquant_matrix
 
-    @partial(jax.jit, static_argnames=("mesh_and_axis"))
+    # @partial(jax.jit, static_argnames=("mesh_and_axis"))
     def with_mesh_and_axis(self, mesh_and_axis):
         new_quant_matrix = dataclasses.replace(self, mesh_and_axis=mesh_and_axis)
         mesh, shard_axis = mesh_and_axis

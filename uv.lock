@@ -166,6 +166,15 @@ wheels = [
 ]
 
 [[package]]
+name = "fire"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "termcolor" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6b/b6/82c7e601d6d3c3278c40b7bd35e17e82aa227f050aa9f66cb7b7fce29471/fire-0.7.0.tar.gz", hash = "sha256:961550f07936eaf65ad1dc8360f2b2bf8408fad46abbfa4d2a3794f8d2a95cdf", size = 87189 }
+
+[[package]]
 name = "flax"
 version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -283,6 +292,19 @@ tpu = [
     { name = "jaxlib" },
     { name = "libtpu-nightly" },
     { name = "requests" },
+]
+
+[[package]]
+name = "jax-smi"
+version = "1.0.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fire" },
+    { name = "jax" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/66/ed/8e6fe7488e7118e4108fd577162ce54132924399af60a42080a296ab51b4/jax_smi-1.0.4.tar.gz", hash = "sha256:f0bfc1b5bd9b90a6f2a638d934c4076b12bba0b94998894c7eb07058a68d5472", size = 3806 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/f4/1b51781413cab18213f88692be2ddc3c2422ff9e319264db8ef8da945875/jax_smi-1.0.4-py3-none-any.whl", hash = "sha256:4c55e7ccd638bd884b1920370eaffe6cb8841b18cec36236a3e87a6eabc6fc06", size = 4466 },
 ]
 
 [[package]]
@@ -1000,6 +1022,15 @@ wheels = [
 ]
 
 [[package]]
+name = "termcolor"
+version = "2.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/37/72/88311445fd44c455c7d553e61f95412cf89054308a1aa2434ab835075fc5/termcolor-2.5.0.tar.gz", hash = "sha256:998d8d27da6d48442e8e1f016119076b690d962507531df4890fcd2db2ef8a6f", size = 13057 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7f/be/df630c387a0a054815d60be6a97eb4e8f17385d5d6fe660e1c02750062b4/termcolor-2.5.0-py3-none-any.whl", hash = "sha256:37b17b5fc1e604945c2642c872a3764b5d547a48009871aea3edd3afa180afb8", size = 7755 },
+]
+
+[[package]]
 name = "tokenizers"
 version = "0.19.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1127,6 +1158,7 @@ dependencies = [
     { name = "equinox" },
     { name = "flax" },
     { name = "jax", extra = ["tpu"] },
+    { name = "jax-smi" },
     { name = "libtpu-nightly" },
     { name = "matplotlib" },
     { name = "qax" },
@@ -1140,6 +1172,7 @@ requires-dist = [
     { name = "equinox", specifier = ">=0.11.5" },
     { name = "flax", specifier = ">=0.9.0" },
     { name = "jax", extras = ["tpu"], specifier = ">=0.4.31" },
+    { name = "jax-smi", specifier = ">=1.0.4" },
     { name = "libtpu-nightly", url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20240729+default-py3-none-any.whl" },
     { name = "matplotlib", specifier = ">=3.9.2" },
     { name = "qax", specifier = ">=0.3.1" },
