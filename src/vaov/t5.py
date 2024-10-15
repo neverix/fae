@@ -38,9 +38,25 @@ if __name__ == "__main__":
     mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(-1, 4, 1), ("dp", "fsdp", "tp"))
     input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", None))
 
+    def shard_inputs(inputs):
+        return jax.device_put(
+            inputs.reshape(mesh.shape["dp"], -1, inputs.shape[-1]), input_sharding
+        )
+
     model_name = "nev/t5-v1_1-xxl-flax"
-    model, params = FlaxT5EncoderModel.from_pretrained(model_name, _do_init=False, dtype=jnp.bfloat16)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    input = "The color of the sky is: "
+    encoder_input = jnp.asarray(tokenizer.encode(input), dtype=jnp.int32)[None]
+    encoder_input = jnp.pad(
+        encoder_input,
+        ((0, 0), (0, 128 - encoder_input.shape[-1])),
+        mode="constant",
+        constant_values=tokenizer.pad_token_id,
+    )
+    encoder_input = jnp.repeat(encoder_input, 256, axis=0)
+    encoder_input = shard_inputs(encoder_input)
+
+    model, params = FlaxT5EncoderModel.from_pretrained(model_name, _do_init=False, dtype=jnp.bfloat16)
     params = quantize_params_tree(params, mesh_and_axis=(mesh, None))
 
     wrapped_model = jax.jit(qax.use_implicit_args(model.__call__))
@@ -52,15 +68,6 @@ if __name__ == "__main__":
                 x.use_kernel = value
 
         jax.tree.map(op, tree, is_leaf=lambda x: isinstance(x, QuantMatrix))
-
-    def shard_inputs(inputs):
-        return jax.device_put(inputs.reshape(mesh.shape["dp"], -1, inputs.shape[1]), input_sharding)
-
-    input = "The color of the sky is: "
-    encoder_input = jnp.asarray(tokenizer.encode(input), dtype=jnp.int32)[None]
-    encoder_input = jnp.pad(encoder_input, (0, 128 - encoder_input.shape[1]), mode="constant", constant_values=tokenizer.pad_token_id)
-    encoder_input = jnp.repeat(encoder_input, 256, axis=0)
-    encoder_input = shard_inputs(encoder_input)
 
     set_use_kernel(params, True)
     quantized_states = jax.jit(lambda ids: wrapped_model(params=params, input_ids=ids).last_hidden_state)(encoder_input)

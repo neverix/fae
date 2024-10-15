@@ -312,11 +312,11 @@ class FlaxT5Attention(nn.Module):
 
     def _split_heads(self, hidden_states):
         return hidden_states.reshape(
-            hidden_states.shape[:2] + (self.n_heads, self.key_value_proj_dim)
+            hidden_states.shape[:-1] + (self.n_heads, self.key_value_proj_dim)
         )
 
     def _merge_heads(self, hidden_states):
-        return hidden_states.reshape(hidden_states.shape[:2] + (self.inner_dim,))
+        return hidden_states.reshape(hidden_states.shape[:-2] + (self.inner_dim,))
 
     @nn.compact
     def _concatenate_to_cache(self, key, value, query, attention_mask):
@@ -371,8 +371,9 @@ class FlaxT5Attention(nn.Module):
             and self.has_variable("cache", "cached_key")
             and (not init_cache)
         )
-        key_length = key_states.shape[1]
-        query_length = key_length if cache_is_filled else query_states.shape[1]
+        # print("KEY StATES", key_states.shape)
+        key_length = key_states.shape[-3]
+        query_length = key_length if cache_is_filled else query_states.shape[-3]
 
         if self.has_relative_attention_bias:
             position_bias = self.compute_bias(query_length, key_length)
@@ -383,14 +384,14 @@ class FlaxT5Attention(nn.Module):
                 (1, self.n_heads, query_length, key_length), dtype=self.dtype
             )
 
-        # if key and values are already calculated, only the last query position bias should be taken
-        if cache_is_filled:
-            max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
-            position_bias = jax.lax.dynamic_slice(
-                position_bias,
-                (0, 0, causal_attention_mask_shift, 0),
-                (1, self.n_heads, seq_length, max_decoder_length),
-            )
+        # # if key and values are already calculated, only the last query position bias should be taken
+        # if cache_is_filled:
+        #     max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
+        #     position_bias = jax.lax.dynamic_slice(
+        #         position_bias,
+        #         (0, 0, causal_attention_mask_shift, 0),
+        #         (1, self.n_heads, seq_length, max_decoder_length),
+        #     )
         return position_bias
 
     def __call__(
@@ -407,7 +408,7 @@ class FlaxT5Attention(nn.Module):
         """
         Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
         """
-        batch_size, seq_length = hidden_states.shape[:2]
+        batch_size, seq_length = hidden_states.shape[-3:-1]
 
         # q, k, v projections
         query_states = self.q(
@@ -438,29 +439,30 @@ class FlaxT5Attention(nn.Module):
             if (self.has_variable("cache", "cached_key") and self.causal)
             else 0
         )
-        # create causal attention_mask; attention_mask has to be defined when model is causal
-        if self.causal:
-            causal_attention_mask = make_causal_mask(attention_mask, dtype="bool")
+        # # create causal attention_mask; attention_mask has to be defined when model is causal
+        # if self.causal:
+        #     causal_attention_mask = make_causal_mask(attention_mask, dtype="bool")
 
-            # fast decoding for generate requires special attention_mask
-            if self.has_variable("cache", "cached_key"):
-                max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
-                causal_attention_mask = jax.lax.dynamic_slice(
-                    causal_attention_mask,
-                    (0, 0, causal_attention_mask_shift, 0),
-                    (1, 1, seq_length, max_decoder_length),
-                )
+        #     # fast decoding for generate requires special attention_mask
+        #     if self.has_variable("cache", "cached_key"):
+        #         max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
+        #         causal_attention_mask = jax.lax.dynamic_slice(
+        #             causal_attention_mask,
+        #             (0, 0, causal_attention_mask_shift, 0),
+        #             (1, 1, seq_length, max_decoder_length),
+        #         )
 
-            # broadcast causal attention mask & attention mask to fit for merge
-            causal_attention_mask = jnp.broadcast_to(
-                causal_attention_mask, (batch_size,) + causal_attention_mask.shape[1:]
-            )
-            attention_mask = jnp.broadcast_to(
-                jnp.expand_dims(attention_mask, axis=(-3, -2)),
-                causal_attention_mask.shape,
-            )
-            attention_mask = combine_masks(attention_mask, causal_attention_mask)
-        elif attention_mask is not None:
+        #     # broadcast causal attention mask & attention mask to fit for merge
+        #     causal_attention_mask = jnp.broadcast_to(
+        #         causal_attention_mask, (batch_size,) + causal_attention_mask.shape[1:]
+        #     )
+        #     attention_mask = jnp.broadcast_to(
+        #         jnp.expand_dims(attention_mask, axis=(-3, -2)),
+        #         causal_attention_mask.shape,
+        #     )
+        #     attention_mask = combine_masks(attention_mask, causal_attention_mask)
+        # print("attnmask", attention_mask.shape)
+        if attention_mask is not None:
             attention_mask = jnp.expand_dims(attention_mask, axis=(-3, -2))
 
         # During fast autoregressive decoding, we feed one position at a time,
@@ -491,6 +493,9 @@ class FlaxT5Attention(nn.Module):
             )
 
             if attention_mask is not None:
+                # print("HS", hidden_states.shape)
+                # print("bs", batch_size, seq_length)
+                # print("pbam", position_bias.shape, attention_mask.shape)
                 position_bias = position_bias + attention_mask
 
         # create dropout rng
@@ -1188,8 +1193,8 @@ class FlaxT5PreTrainedModel(FlaxPreTrainedModel):
         )
         return unfreeze(init_variables["cache"])
 
-    @add_start_docstrings(T5_ENCODE_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=FlaxBaseModelOutput, config_class=T5Config)
+    # @add_start_docstrings(T5_ENCODE_INPUTS_DOCSTRING)
+    # @replace_return_docstrings(output_type=FlaxBaseModelOutput, config_class=T5Config)
     def encode(
         self,
         input_ids: jnp.ndarray,
@@ -1254,10 +1259,10 @@ class FlaxT5PreTrainedModel(FlaxPreTrainedModel):
             method=_encoder_forward,
         )
 
-    @add_start_docstrings(T5_DECODE_INPUTS_DOCSTRING)
-    @replace_return_docstrings(
-        output_type=FlaxBaseModelOutputWithPastAndCrossAttentions, config_class=T5Config
-    )
+    # @add_start_docstrings(T5_DECODE_INPUTS_DOCSTRING)
+    # @replace_return_docstrings(
+    #     output_type=FlaxBaseModelOutputWithPastAndCrossAttentions, config_class=T5Config
+    # )
     def decode(
         self,
         decoder_input_ids,
@@ -1310,7 +1315,7 @@ class FlaxT5PreTrainedModel(FlaxPreTrainedModel):
 
         encoder_hidden_states = encoder_outputs[0]
         if encoder_attention_mask is None:
-            batch_size, sequence_length = encoder_hidden_states.shape[:2]
+            batch_size, sequence_length = encoder_hidden_states.shape[-3:-1]
             encoder_attention_mask = jnp.ones((batch_size, sequence_length))
 
         batch_size, sequence_length = decoder_input_ids.shape
@@ -1542,10 +1547,10 @@ FLAX_T5_MODEL_DOCSTRING = """
 """
 
 
-overwrite_call_docstring(FlaxT5Model, T5_INPUTS_DOCSTRING + FLAX_T5_MODEL_DOCSTRING)
-append_replace_return_docstrings(
-    FlaxT5Model, output_type=FlaxSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
-)
+# overwrite_call_docstring(FlaxT5Model, T5_INPUTS_DOCSTRING + FLAX_T5_MODEL_DOCSTRING)
+# append_replace_return_docstrings(
+#     FlaxT5Model, output_type=FlaxSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+# )
 
 
 @add_start_docstrings(
@@ -1774,10 +1779,10 @@ class FlaxT5ForConditionalGenerationModule(nn.Module):
 class FlaxT5ForConditionalGeneration(FlaxT5PreTrainedModel):
     module_class = FlaxT5ForConditionalGenerationModule
 
-    @add_start_docstrings(T5_DECODE_INPUTS_DOCSTRING)
-    @replace_return_docstrings(
-        output_type=FlaxCausalLMOutputWithCrossAttentions, config_class=T5Config
-    )
+    # @add_start_docstrings(T5_DECODE_INPUTS_DOCSTRING)
+    # @replace_return_docstrings(
+    #     output_type=FlaxCausalLMOutputWithCrossAttentions, config_class=T5Config
+    # )
     def decode(
         self,
         decoder_input_ids,
@@ -1830,7 +1835,7 @@ class FlaxT5ForConditionalGeneration(FlaxT5PreTrainedModel):
 
         encoder_hidden_states = encoder_outputs[0]
         if encoder_attention_mask is None:
-            batch_size, sequence_length = encoder_hidden_states.shape[:2]
+            batch_size, sequence_length = encoder_hidden_states.shape[-3:-1]
             encoder_attention_mask = jnp.ones((batch_size, sequence_length))
 
         batch_size, sequence_length = decoder_input_ids.shape
@@ -1974,12 +1979,12 @@ FLAX_T5_CONDITIONAL_GENERATION_DOCSTRING = """
 """
 
 
-overwrite_call_docstring(
-    FlaxT5ForConditionalGeneration,
-    T5_INPUTS_DOCSTRING + FLAX_T5_CONDITIONAL_GENERATION_DOCSTRING,
-)
-append_replace_return_docstrings(
-    FlaxT5ForConditionalGeneration,
-    output_type=FlaxSeq2SeqLMOutput,
-    config_class=_CONFIG_FOR_DOC,
-)
+# overwrite_call_docstring(
+#     FlaxT5ForConditionalGeneration,
+#     T5_INPUTS_DOCSTRING + FLAX_T5_CONDITIONAL_GENERATION_DOCSTRING,
+# )
+# append_replace_return_docstrings(
+#     FlaxT5ForConditionalGeneration,
+#     output_type=FlaxSeq2SeqLMOutput,
+#     config_class=_CONFIG_FOR_DOC,
+# )

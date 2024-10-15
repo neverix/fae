@@ -380,6 +380,11 @@ def dot_general_handler(
     if not b.use_kernel:
         return NotImplemented
 
+    while a.shape[-1] != b.shape[0]:
+        a = a.reshape(a.shape[:-2], -1)
+        if a.shape[-1] > b.shape[0]:
+            raise NotImplementedError
+
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dimension_numbers
     if (
         rhs_batch
@@ -400,7 +405,8 @@ def dot_general_handler(
         tensors = b.quants, b.scales
         # Reshape a to be 3-D
         orig_a_shape = a.shape
-        a = a.reshape(-1, a.shape[-2], a.shape[-1])
+        # (dp, fsdp, tp)
+        a = a.reshape(-1, a.shape[1], a.shape[-1])
         if map_axis in (0, 1):
             def matmul(inputs, *tensors):
                 orig_inputs_shape = inputs.shape
