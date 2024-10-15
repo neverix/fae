@@ -70,6 +70,6 @@ if __name__ == "__main__":
         jax.tree.map(op, tree, is_leaf=lambda x: isinstance(x, QuantMatrix))
 
     set_use_kernel(params, True)
-    quantized_states = jax.jit(lambda ids: wrapped_model(params=params, input_ids=ids).last_hidden_state)(encoder_input)
-    print(jnp.mean(jnp.abs(quantized_states)))
+    quantized_states = jax.jit(lambda params, ids: wrapped_model(params=params, input_ids=ids).last_hidden_state)(params, encoder_input)
+    print(jax.jit(lambda x: jnp.mean(jnp.abs(x)))(quantized_states))
     exit()
