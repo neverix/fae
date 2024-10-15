@@ -10,7 +10,7 @@ dependencies = [
     "equinox>=0.11.5",
     "flax>=0.9.0",
     "jax-smi>=1.0.4",
-    "jax[tpu]>=0.4.31",
+    "jax[tpu]>=0.4.34",
     "libtpu-nightly",
     "matplotlib>=3.9.2",
     "qax>=0.3.1",
@@ -31,5 +31,5 @@ extra-index-url = ["https://download.pytorch.org/whl/cpu"]
 index-strategy = "first-index"
 
 [tool.uv.sources]
-libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20240729+default-py3-none-any.whl" }
+libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" }
 
