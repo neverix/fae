@@ -1,4 +1,3 @@
-import jaxonnxruntime.onnx_ops.resize
 from jaxonnxruntime import backend as jax_backend
 from PIL import Image
 import numpy as np

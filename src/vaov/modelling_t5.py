@@ -1,3 +1,5 @@
+# ruff: noqa
+
 # coding=utf-8
 # Copyright 2021 T5 Authors and HuggingFace Inc. team.
 #

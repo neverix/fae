@@ -1,8 +1,6 @@
 import jax
 import jax.numpy as jnp
 import jax.numpy as np
-import jax
-from math import ceil
 from functools import partial
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
@@ -31,7 +29,7 @@ def test_min_dim():
     M = 16
     A = jax.random.normal(jax.random.PRNGKey(0), (N, K), dtype=jnp.bfloat16)
     B = jax.random.normal(jax.random.PRNGKey(1), (K, M), dtype=jnp.bfloat16).astype(jnp.int4)
-    C = pl.pallas_call(
+    pl.pallas_call(
         simple_matmul,
         grid=(1, 1, 1),
         out_shape=jax.ShapeDtypeStruct(
