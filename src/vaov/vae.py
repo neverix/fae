@@ -1,3 +1,4 @@
+import jaxonnxruntime.onnx_ops.resize
 from jaxonnxruntime import backend as jax_backend
 from PIL import Image
 import numpy as np
@@ -7,6 +8,7 @@ import onnx
 # apt install git-lfs
 # mkdir -p somewhere
 # cd somewhere && git lfs clone https://huggingface.co/nev/taef1
+# python -m src.vaov.vae
 dog_image_url = "https://www.akc.org/wp-content/uploads/2017/11/Shiba-Inu-standing-in-profile-outdoors.jpg"
 dog_image = Image.open(requests.get(dog_image_url, stream=True).raw)
 encoder_model = onnx.load("somewhere/taef1/taef1_encoder.onnx")
@@ -21,6 +23,6 @@ encoded = encoder_rep.run({"input": inputs})
 print("running decoder")
 decoded = decoder_rep.run({"input": encoded[0]})
 output = Image.fromarray(
-    ((decoded[0].transpose(0, 2, 3, 1)) * 255.0).clip(0, 255).astype(np.uint8)[0]
+    ((np.asarray(decoded)[0].transpose(0, 2, 3, 1)) * 255.0).clip(0, 255).astype(np.uint8)[0]
 ).convert("RGB")
 output.save("somewhere/dog.jpg")

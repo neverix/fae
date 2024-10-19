@@ -337,7 +337,7 @@ wheels = [
 [[package]]
 name = "jaxonnxruntime"
 version = "0.3.0"
-source = { git = "https://github.com/google/jaxonnxruntime#494df3463ce1b359d0b8b04094864dffb172a47a" }
+source = { directory = "jort" }
 dependencies = [
     { name = "absl-py" },
     { name = "chex" },
@@ -345,6 +345,22 @@ dependencies = [
     { name = "jaxlib" },
     { name = "jaxtyping" },
     { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "absl-py" },
+    { name = "chex" },
+    { name = "jax" },
+    { name = "jaxlib" },
+    { name = "jaxtyping" },
+    { name = "mypy", marker = "extra == 'testing'" },
+    { name = "numpy" },
+    { name = "onnx", marker = "extra == 'all'", specifier = "==1.12.0" },
+    { name = "pytest", marker = "extra == 'testing'" },
+    { name = "pytest-cov", marker = "extra == 'testing'" },
+    { name = "pytest-custom-exit-code", marker = "extra == 'testing'" },
+    { name = "pytest-xdist", marker = "extra == 'testing'" },
 ]
 
 [[package]]
@@ -1215,7 +1231,7 @@ requires-dist = [
     { name = "flax", specifier = ">=0.9.0" },
     { name = "jax", extras = ["tpu"], specifier = ">=0.4.34" },
     { name = "jax-smi", specifier = ">=1.0.4" },
-    { name = "jaxonnxruntime", git = "https://github.com/google/jaxonnxruntime" },
+    { name = "jaxonnxruntime", directory = "jort" },
     { name = "libtpu-nightly", url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" },
     { name = "matplotlib", specifier = ">=3.9.2" },
     { name = "onnx", specifier = ">=1.17.0" },

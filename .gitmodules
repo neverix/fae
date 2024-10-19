@@ -1,0 +1,3 @@
+[submodule "jort"]
+	path = jort
+	url = https://github.com/neverix/jaxonnxruntime

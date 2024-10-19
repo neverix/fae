@@ -34,5 +34,4 @@ index-strategy = "first-index"
 
 [tool.uv.sources]
 libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" }
-jaxonnxruntime = { git = "https://github.com/google/jaxonnxruntime" }
-
+jaxonnxruntime = { path = "jort" }
