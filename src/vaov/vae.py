@@ -8,7 +8,7 @@ import onnx
 # apt install git-lfs
 # mkdir -p somewhere
 # cd somewhere && git lfs clone https://huggingface.co/nev/taef1
-# python -m src.vaov.vae
+# uv pip install -U ./jort && rm -rf .venv && uv sync && JAX_PLATFORMS=cpu uv run python -m src.vaov.vae
 dog_image_url = "https://www.akc.org/wp-content/uploads/2017/11/Shiba-Inu-standing-in-profile-outdoors.jpg"
 dog_image = Image.open(requests.get(dog_image_url, stream=True).raw)
 encoder_model = onnx.load("somewhere/taef1/taef1_encoder.onnx")
