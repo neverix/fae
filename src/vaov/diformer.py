@@ -3,7 +3,7 @@ import equinox as eqx
 from equinox import nn
 from dataclasses import dataclass
 from jaxtyping import Array, Float, UInt
-from typing import Optional
+from typing import Optional, Tuple
 import jax.numpy as jnp
 from einops import rearrange
 import jax
@@ -49,6 +49,20 @@ def rope(pos: Float[Array, "*batch n_seq"], dim: int, theta: int) -> Float[Array
     )
     out = rearrange(out, "... n d (i j) -> ... n d i j", i=2, j=2)
     return out.astype(jnp.float32)
+
+
+def attention(
+    q: Float[Array, "*batch n_seq n_heads d_head"],
+    k: Float[Array, "*batch n_seq n_heads d_head"],
+    v: Float[Array, "*batch n_seq n_heads d_head"],
+    pe: Float[Array, "*batch n_seq d_head 2 2"],
+) -> Float[Array, "*batch n_seq (n_heads d_head)"]:
+    q, k = apply_rope(q, k, pe)
+
+    x = jax.nn.dot_product_attention(q, k, v)
+    x = rearrange(x, "... h d -> ... (h d)")
+
+    return x
 
 
 def apply_rope(xq: Float[Array, "*batch (d_model 2)"], xk: Float[Array, "*batch (d_model 2)"],
@@ -220,6 +234,59 @@ class LastLayer(eqx.Module):
         return x
 
 
+class QKNorm(eqx.Module):
+    query_norm: nn.RMSNorm
+    key_norm: nn.RMSNorm
+    def __init__(self, dim: int):
+        super().__init__()
+        self.query_norm = nn.RMSNorm(dim)
+        self.key_norm = nn.RMSNorm(dim)
+
+    def apply_norm(self, x: Float[Array, "*batch dim"], norm: nn.RMSNorm) -> Float[Array, "*batch dim"]:
+        if len(x.shape) > len(norm.shape):
+            return jax.vmap(self.apply_norm, in_axes=(0, None))(x, norm)
+        return norm(x)
+
+    def __call__(
+        self,
+        q: Float[Array, "*batch dim"],
+        k: Float[Array, "*batch dim"],
+        v: Float[Array, "*batch dim"],
+    ) -> Tuple[Float[Array, "*batch dim"], Float[Array, "*batch dim"]]:
+        q = self.apply_norm(q, self.query_norm)
+        k = self.apply_norm(k, self.key_norm)
+        return q.astype(v), k.astype(v)
+
+
+@dataclass
+class ModulationOut:
+    shift: Float[Array, "*batch seq dim"]
+    scale: Float[Array, "*batch seq dim"]
+    gate: Float[Array, "*batch seq dim"]
+    
+    def __call__(self, x: Float[Array, "*batch seq dim"]) -> Float[Array, "*batch seq dim"]:
+        return (1 + self.scale) * x + self.shift
+
+
+class Modulation(eqx.Module):
+    is_double: bool
+    multiplier: int
+    lin: VLinear
+
+    def __init__(self, dim: int, double: bool, *, key: jax.random.PRNGKey):
+        self.is_double = double
+        self.multiplier = 6 if double else 3
+        self.lin = VLinear(dim, self.multiplier * dim, use_bias=True, key=key)
+
+    def __call__(self, vec: Float[Array, "*batch dim"]) -> tuple[ModulationOut, ModulationOut | None]:
+        out = jnp.split(self.lin(jax.nn.silu(vec))[..., None, :], self.multiplier, axis=-1)
+
+        return (
+            ModulationOut(*out[:3]),
+            ModulationOut(*out[3:]) if self.is_double else None,
+        )
+
+
 class DoubleStreamBlock(eqx.Module):
     """Main two-stream MMDiT block."""
     weight_img: VLinear
@@ -237,13 +304,75 @@ class DoubleStreamBlock(eqx.Module):
 
 class SingleStreamBlock(eqx.Module):
     """Main single-stream MMDiT block."""
-    weight: VLinear
+    config: DiFormerConfig
+    head_dim: int
+
+    attn_qkv_proj: VLinear
+    mlp_in_proj: VLinear
+    attn_o_proj: VLinear
+    mlp_out_proj: VLinear
+
+    qk_norm: QKNorm
+    pre_norm: VLayerNorm
+    modulation: Modulation
+    
     def __init__(self, config: DiFormerConfig, *, key: jax.random.PRNGKey):
-        self.weight = VLinear(config.hidden_size, config.hidden_size, key=key)
+        self.config = config
+
+        self.head_dim = config.hidden_size // config.num_heads
+        
+        mlp_hidden_dim = int(config.hidden_size * config.mlp_ratio)
+        self.attn_qkv_proj = VLinear(
+            config.hidden_size,
+            config.hidden_size * 3,
+            key=key,
+            use_bias=True,
+        )
+        self.mlp_in_proj = VLinear(
+            config.hidden_size,
+            mlp_hidden_dim,
+            key=key,
+            use_bias=True,
+        )
+        self.attn_o_proj = VLinear(
+            config.hidden_size,
+            config.hidden_size,
+            key=key,
+            use_bias=True,
+        )
+        self.mlp_out_proj = VLinear(
+            mlp_hidden_dim,
+            config.hidden_size,
+            key=key,
+            use_bias=True
+        )
+
+        self.qk_norm = QKNorm(self.head_dim)
+        self.pre_norm = VLayerNorm(config.hidden_size, use_weight=False, use_bias=False, eps=1e-6)
+        
+        self.modulation = Modulation(config.hidden_size, double=False, key=key)
     
     def __call__(self, data, vec, pe):
-        # data = self.weight(data)
-        return data
+        mod, _ = self.modulation(vec)
+        x = self.pre_norm(data)
+        x = mod(x)
+        
+        qkv = self.attn_qkv_proj(x)
+        mlp = self.mlp_in_proj(x)
+        mlp = jax.nn.gelu(mlp, approximate=True)
+
+        q, k, v = rearrange(
+            qkv,
+            "... n (qkv heads dim) -> qkv ... n heads dim",
+            qkv=3,
+            dim=self.head_dim,
+        )
+        q, k = self.qk_norm(q, k, v)
+        
+        attn = attention(q, k, v, pe=pe)
+        output = self.mlp_out_proj(mlp) + self.attn_o_proj(attn)
+
+        return x + mod.gate * output
 
 
 class DiFormer(eqx.Module):
