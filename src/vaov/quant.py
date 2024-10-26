@@ -329,10 +329,19 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
 
     def __post_init__(self):
         self.dtype = self.orig_dtype
-        self.shape = (
-            self.quants.shape[0] * self.quants.shape[1],
-            self.quants.shape[2],
+        self.shape = self.quants.shape[:-3] + (
+            self.quants.shape[-3] * self.quants.shape[-2],
+            self.quants.shape[-1],
         )
+
+    def stack(self, *quants):
+        return QuantMatrix(
+            quants=jnp.stack((self.quants,) + tuple(x.quants for x in quants), axis=0),
+            scales=jnp.stack((self.scales,) + tuple(x.scales for x in quants), axis=0),
+            use_approx=self.use_approx, use_kernel=self.use_kernel, orig_dtype=self.orig_dtype,
+            mesh_and_axis=self.mesh_and_axis
+        )
+        
 
     def materialize(self):
         if self.use_kernel:
@@ -556,6 +565,49 @@ def check_accuracy(inputs, matrix, quant_matrix):
 
 
 if __name__ == "__main__":
+    a, b, c = 512, 512, 512
+
+    with jax.default_device(jax.devices("cpu")[0]):
+        inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
+        matrix = jax.random.normal(jax.random.key(1), (b, c), dtype=jnp.bfloat16)
+
+    quant_matrix = quantize_matrix(matrix, use_approx=True)
+    shard_axis = None
+    mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, -1, 1), ("dp", "fsdp", "tp"))
+    quant_matrix = quant_matrix.with_mesh_and_axis((mesh, shard_axis))
+    input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", None))
+    inputs_device = jax.device_put(inputs.reshape(-1, 64, inputs.shape[-1]), input_sharding)
+
+    inputs_device = jax.block_until_ready(inputs_device)
+    quant_matrix = jax.block_until_ready(quant_matrix)
+    super_quant = quant_matrix.stack(quant_matrix)
+    
+    @jax.jit
+    @qax.use_implicit_args
+    def h(a, b):
+        return a @ b
+    print(inputs_device.shape, quant_matrix.shape, h(inputs_device, quant_matrix).shape)
+    print(super_quant.shape)
+    jax.debug.inspect_array_sharding(super_quant.quants, callback=print)
+
+    @jax.jit
+    def g(x):
+        return jnp.mean(jnp.abs(x))
+
+    @jax.jit
+    @qax.use_implicit_args
+    def f(a, b):
+        def inner(a, b):
+            print(a.shape, b.shape, (a @ b).shape)
+            return a @ b, None
+        print(b)
+        y = jax.lax.scan(inner, a, b,)[0]
+        return jnp.mean(jnp.abs(y))
+    print(f(inputs_device, super_quant))
+    print(g(h(h(inputs_device, quant_matrix), quant_matrix)))
+
+    exit()
+
     # x = jnp.arange(16, dtype=jnp.int32)
     # print(nf4[x].tolist())
     # print(nf4xf32_to_f32(x).tolist())
