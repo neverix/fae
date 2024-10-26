@@ -48,8 +48,17 @@ def rope(pos: Float[Array, "*batch n_seq"], dim: int, theta: int) -> Float[Array
         [jnp.cos(out), -jnp.sin(out), jnp.sin(out), jnp.cos(out)], axis=-1
     )
     out = rearrange(out, "... n d (i j) -> ... n d i j", i=2, j=2)
-    
-    return out.float()
+    return out.astype(jnp.float32)
+
+
+def apply_rope(xq: Float[Array, "*batch (d_model 2)"], xk: Float[Array, "*batch (d_model 2)"],
+               freqs_cis: Float[Array, "*batch d_model 2 2"]) -> tuple[
+                   Float[Array, "*batch d_model"], Float[Array, "*batch d_model"]]:
+    xq_ = xq.astype(jnp.float32).reshape(*xq.shape[:-1], -1, 1, 2)
+    xk_ = xk.astype(jnp.float32).reshape(*xk.shape[:-1], -1, 1, 2)
+    xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
+    xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
+    return xq_out.reshape(*xq.shape).astype(xq), xk_out.reshape(*xk.shape).astype(xk)
 
 
 def timestep_embedding(
@@ -102,9 +111,10 @@ class EmbedND(eqx.Module):
         n_axes = ids.shape[-1]
         emb = jnp.concatenate(
             [rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)],
+            # "*batch n_seq {dim} 2 2"
             axis=-3,
         )
-        return emb.unsqueeze(1)
+        return emb[..., None, :, :, :]
 
 
 class VLinear(nn.Linear):
@@ -133,7 +143,7 @@ class VLinear(nn.Linear):
         else:
             self.bias = None
 
-    def __call__(self, x: Float[Array, "*batch in_channels"]) -> Float[Array, "*batch out_channels"]:
+    def __call__(self, x: Float[Array, "*batch in_channels"], **kwargs) -> Float[Array, "*batch out_channels"]:
         """
         Apply linear transformation.
 
@@ -182,6 +192,60 @@ class MLPEmbedder(eqx.Module):
         return self.out_layer(jax.nn.silu(self.in_layer(x)))
 
 
+class VLayerNorm(nn.LayerNorm):
+    def __call__(self, x, **kwargs):
+        if len(x.shape) > len(self.shape):
+            return jax.vmap(self)(x, **kwargs)
+        return super().__call__(x, **kwargs)
+
+
+class LastLayer(eqx.Module):
+    norm_final: VLayerNorm
+    linear: VLinear
+    adaLN_modulation: eqx.Module
+
+    def __init__(self, hidden_size: int, patch_size: int, out_channels: int, *, key: jax.random.PRNGKey):
+        super().__init__()
+        self.norm_final = VLayerNorm(hidden_size, use_weight=False, use_bias=False, eps=1e-6)
+        self.linear = VLinear(hidden_size, patch_size * patch_size * out_channels, use_bias=True, key=key)
+        self.adaLN_modulation = nn.Sequential((
+            nn.Lambda(jax.nn.silu),
+            VLinear(hidden_size, 2 * hidden_size, use_bias=True, key=key)
+        ))
+
+    def __call__(self, x: Float[Array, "*batch n_seq hidden_size"], vec: "*batch hidden_size") -> Float[Array, "*batch n_seq hidden_size"]:
+        shift, scale = jnp.split(self.adaLN_modulation(vec), 2, axis=-1)
+        x = (1 + scale[..., None, :]) * self.norm_final(x) + shift[..., None, :]
+        x = self.linear(x)
+        return x
+
+
+class DoubleStreamBlock(eqx.Module):
+    """Main two-stream MMDiT block."""
+    weight_img: VLinear
+    weight_txt: VLinear
+    def __init__(self, config: DiFormerConfig, *, key: jax.random.PRNGKey):
+        self.weight_img = VLinear(config.hidden_size, config.hidden_size, key=key)
+        self.weight_txt = VLinear(config.hidden_size, config.hidden_size, key=key)
+    
+    def __call__(self, data, vec, pe):
+        img, txt = data["img"], data["txt"]
+        # img = self.weight(img)
+        # txt = self.weight(txt)
+        return dict(img=img, txt=txt)
+
+
+class SingleStreamBlock(eqx.Module):
+    """Main single-stream MMDiT block."""
+    weight: VLinear
+    def __init__(self, config: DiFormerConfig, *, key: jax.random.PRNGKey):
+        self.weight = VLinear(config.hidden_size, config.hidden_size, key=key)
+    
+    def __call__(self, data, vec, pe):
+        # data = self.weight(data)
+        return data
+
+
 class DiFormer(eqx.Module):
     """Diffusion transformer."""
     config: DiFormerConfig
@@ -191,6 +255,10 @@ class DiFormer(eqx.Module):
     txt_in: VLinear
     vector_in: MLPEmbedder
     guidance_in: eqx.Module
+    
+    double_blocks: tuple[DoubleStreamBlock]
+    single_blocks: tuple[SingleStreamBlock]
+    final_layer: LastLayer
 
     def __init__(self, config: DiFormerConfig, key: jax.random.PRNGKey):
         """
@@ -213,8 +281,13 @@ class DiFormer(eqx.Module):
         self.txt_in = VLinear(config.context_in_dim, config.hidden_size, key=key)
         self.vector_in = MLPEmbedder(config.vec_in_dim, config.hidden_size, key=key)
         self.guidance_in = (
-            MLPEmbedder(in_dim=self.config.guidance_embed_dim, hidden_dim=self.config.hidden_size, key=key) if config.guidance_embed else nn.Identity()
+            MLPEmbedder(in_dim=self.config.guidance_embed_dim, hidden_dim=config.hidden_size, key=key) if config.guidance_embed else nn.Identity()
         )
+        
+        self.double_blocks = tuple(DoubleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth))
+        self.single_blocks = tuple(SingleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth_single_blocks))
+    
+        self.final_layer = LastLayer(config.hidden_size, 1, config.in_channels, key=key)
 
     def __call__(
         self,
@@ -225,7 +298,7 @@ class DiFormer(eqx.Module):
         img_ids: UInt[Array, "*batch n_seq 3"],
         txt_ids: Optional[UInt[Array, "*batch n_seq_txt 3"]] = None,
         guidance: Optional[Float[Array, "*batch"]] = None,
-    ):
+    ) -> Float[Array, "*batch n_seq (patch_size patch_size in_channels)"]:
         """
         Forward pass of the diffusion transformer.
 
@@ -252,9 +325,25 @@ class DiFormer(eqx.Module):
             txt_ids = jnp.zeros(txt.shape[:-1] + (3,), dtype=jnp.uint32)
         ids = jnp.concatenate((txt_ids, img_ids), axis=-2)
         pe = self.pe_embedder(ids)
-        
+
+        data = dict(img=img, txt=txt)
         for block in self.double_blocks:
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+            data = block(data, vec=vec, pe=pe)
+
+        txt, img = data["txt"], data["img"]
+        data = jnp.concatenate((txt, img), -2)
+        for block in self.single_blocks:
+            data = block(data, vec=vec, pe=pe)
+        img = img[..., txt.shape[-2]:, :]
+
+        img = self.final_layer(img, vec)
+
+        # weights, logic = eqx.partition(self.block, filter_spec=eqx.is_array)
+        # logic = partial(logic, vec=vec, pe=pe)
+        # img = jax.lax.scan(lambda data, weights: eqx.combine((weights, logic))(data),
+        #                    dict(img=img, txt=txt),
+        #                    weights
+        #                    )["img"]
         
         return img
 
