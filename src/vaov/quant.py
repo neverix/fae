@@ -334,6 +334,19 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
             self.quants.shape[-1],
         )
 
+    @property
+    def block_size(self):
+        return self.quants.shape[-2]
+
+    def slice(self, *, axis: int, start: int, size: int):
+        if axis == self.quants.ndim - 3:
+            start //= self.block_size
+            size //= self.block_size
+        return dataclasses.replace(
+            self,
+            quants=jax.lax.dynamic_slice_in_dim(self.quants, start, size, axis),
+            scales=jax.lax.dynamic_slice_in_dim(self.scales, start, size, axis))
+
     def stack(self, *quants):
         return QuantMatrix(
             quants=jnp.stack((self.quants,) + tuple(x.quants for x in quants), axis=0),
@@ -351,6 +364,9 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
         return self.dequantize()
 
     def dequantize(self):
+        assert len(self.quants.shape) == 3
+        assert len(self.scales.shape) == 3
+        
         codebook = approx_nf4 if self.use_approx else nf4
 
         group_size = self.quants.shape[1]

@@ -34,6 +34,9 @@ class DiFormerConfig:
     qkv_bias: bool = True
     guidance_embed: bool = True
     guidance_embed_dim: int = 256
+    @property
+    def mlp_size(self):
+        return int(self.hidden_size * self.mlp_ratio)
 
 
 def rope(pos: Float[Array, "*batch n_seq"], dim: int, theta: int) -> Float[Array, "*batch n_seq {dim} 2 2"]:
@@ -160,7 +163,7 @@ class VLinear(eqx.Module):
         self.out_channels = out_channels
         self.weight = jax.random.normal(key, (in_channels, out_channels)) * (1 / math.sqrt(in_channels))
         if use_bias:
-            self.bias = jax.random.normal(key, (out_channels))
+            self.bias = jnp.zeros((out_channels,))
         else:
             self.bias = None
 
@@ -326,7 +329,7 @@ class MLP(eqx.Module):
     out_proj: VLinear
     
     def __init__(self, config: DiFormerConfig, *, key: jax.random.PRNGKey):
-        mlp_hidden_dim = int(config.hidden_size * config.mlp_ratio)
+        mlp_hidden_dim = config.mlp_size
         self.in_proj = VLinear(
             config.hidden_size,
             mlp_hidden_dim,
@@ -470,7 +473,7 @@ class SequentialScan(eqx.Module, Generic[T]):
         return jax.lax.scan(scan_fn, x, self.weights)[0]
 
     def __getattr__(self, name):
-        return getattr(self.logic, name)
+        return getattr(self.weights, name)
 
 
 class DiFormer(eqx.Module):
@@ -576,7 +579,7 @@ class DiFormer(eqx.Module):
 
     @classmethod
     def from_pretrained(cls, *args, **kwargs):
-        model = cls(cls.config_cls, jax.random.key(0, impl=dumb_prng_impl))
+        model = cls(cls.config_cls(), jax.random.key(0, impl=dumb_prng_impl))
         return load_flux(model, *args, **kwargs)
 
 
@@ -591,6 +594,12 @@ def selector_fn(name):
             return child_selector(obj[int(name)])
         return child_selector(getattr(obj, name))
     return selector
+
+
+def weight_slice(arr, *, axis: int, start: int, size: int):
+    if isinstance(arr, QuantMatrix):
+        return arr.slice(axis=axis, start=start, size=size)
+    return jax.lax.dynamic_slice_in_dim(arr, start, size, axis=axis)
 
 
 def load_flux(model, path="somewhere/flux.st"):
@@ -609,6 +618,14 @@ def load_flux(model, path="somewhere/flux.st"):
         new_weight = jnp.stack([values[i] for i in list(range(max(values.keys()) + 1))], 0)
         new_flux[key] = new_weight
     flux = new_flux
+
+    flux = {k.replace("attn.norm", "attn.qk_norm"): v for k, v in flux.items()}
+    flux = {k.replace("attn.proj", "attn.o_proj"): v for k, v in flux.items()}
+    flux = {k.replace("attn.qkv.", "attn.qkv_proj."): v for k, v in flux.items()}
+    flux = {k.replace("mlp.0.", "mlp.in_proj."): v for k, v in flux.items()}
+    flux = {k.replace("mlp.2.", "mlp.out_proj."): v for k, v in flux.items()}
+    
+    # fold in nf4 arrays
     array_flux = {}
     nf4_flux = defaultdict(dict)
     for key, value in flux.items():
@@ -618,10 +635,71 @@ def load_flux(model, path="somewhere/flux.st"):
         else:
             array_flux[key] = jnp.asarray(value)
     for key, values in nf4_flux.items():
-        print({k: (v.shape, v.dtype) for k, v in values.items()})
+        if set(values.keys()) == {""}:
+            array_flux[key] = values[""]
+            continue
+        if key == "single_blocks.linear1.weight":
+            og_shape = (
+                model.config.depth_single_blocks,
+                model.config.hidden_size,
+                model.config.hidden_size * 3 + model.config.mlp_size,
+            )
+            og_dtype = jnp.bfloat16
+        elif key == "single_blocks.linear2.weight":
+            og_shape = (model.config.depth_single_blocks, model.config.hidden_size + model.config.mlp_size, model.config.hidden_size)
+            og_dtype = jnp.bfloat16
+        else:
+            try:
+                og_tensor = selector_fn(key)(model)
+            except (AttributeError, TypeError) as e:
+                raise AttributeError(f"Can't get {key}") from e
+            if og_tensor is None:
+                raise AttributeError(f"{key} is not initialized")
+            og_shape = og_tensor.shape
+            og_dtype = og_tensor.dtype
+        quants = values[""]
+        scales = values[".absmax"]
+        block_size = quants.size // scales.size
+        quants = quants.reshape(*quants.shape[:-2], -1, block_size, og_shape[-1])
+        scales = scales.reshape(*scales.shape[:-1], -1, 1, og_shape[-1])
+        quant = QuantMatrix(
+            shape=og_shape,
+            dtype=og_dtype,
+            quants=quants,
+            scales=scales,
+            use_approx=True,
+            use_kernel=True,
+            orig_dtype=og_tensor.dtype,
+            mesh_and_axis=None
+        )
+        array_flux[key] = quant
     flux = array_flux
-    flux = {k.replace("attn.norm", "attn.qk_norm"): v for k, v in flux.items()}
+
     flux = {k.replace("norm.scale", "norm.weight"): v for k, v in flux.items()}
+    linear1 = flux.pop("single_blocks.linear1.weight")
+    qkv, mlp = (
+        weight_slice(linear1, axis=-1,
+                     start=0,
+                     size=model.config.hidden_size * 3),
+        weight_slice(linear1, axis=-1,
+                     start=model.config.hidden_size * 3,
+                     size=model.config.mlp_size))
+    flux["single_blocks.attn.qkv_proj.weight"] = qkv
+    flux["single_blocks.mlp.in_proj.weight"] = mlp
+    linear2 = flux.pop("single_blocks.linear2.weight")
+    qkv, mlp = (
+        weight_slice(linear2, axis=1, start=0, size=model.config.hidden_size),
+        weight_slice(
+            linear2,
+            axis=1,
+            start=model.config.hidden_size,
+            size=model.config.mlp_size,
+        ),
+    )
+    flux["single_blocks.attn.o_proj.weight"] = qkv
+    flux["single_blocks.mlp.out_proj.weight"] = mlp
+    
+    # load weights
     for key, value in flux.items():
         try:
             model = eqx.tree_at(selector_fn(key), model, value)
