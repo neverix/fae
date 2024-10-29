@@ -4,13 +4,16 @@ from equinox import nn
 from dataclasses import dataclass
 from jaxtyping import Array, Float, UInt
 from typing import Optional, Tuple
+from .quant import QuantMatrix
+import qax.primitives
 import jax.numpy as jnp
 from tqdm.auto import tqdm
 from einops import rearrange
 import jax
 import math
+from typing import TypeVar, Generic
 
-@dataclass
+@dataclass(frozen=True)
 class DiFormerConfig:
     """Configuration class for the diffusion transformer."""
     in_channels: int = 64
@@ -429,6 +432,37 @@ class SingleStreamBlock(eqx.Module):
         return x + mod.gate * (attn_out + mlp_out)
 
 
+def is_arr(x):
+    return isinstance(x, qax.primitives.ArrayValue)
+
+
+def unify(arg, *args):
+    if not is_arr(arg):
+        return arg
+    if isinstance(arg, QuantMatrix):
+        return arg.stack(*args)
+    return jnp.stack((arg, *args), axis=0)
+
+
+T = TypeVar('T', bound=eqx.Module)
+
+class SequentialScan(eqx.Module, Generic[T]):
+    logic: T
+    weights: T
+
+    def __init__(self, layers: tuple[T, ...]):
+        self.weights, self.logic = eqx.partition(
+            jax.tree.map(unify, *layers, is_leaf=is_arr), is_arr
+        )
+
+    def __call__(self, x, *args, **kwargs):
+        def scan_fn(carry, weight: T):
+            layer = eqx.combine(weight, self.logic)
+            return layer(carry, *args, **kwargs), None
+
+        return jax.lax.scan(scan_fn, x, self.weights)[0]
+
+
 class DiFormer(eqx.Module):
     """Diffusion transformer."""
     config: DiFormerConfig
@@ -438,9 +472,9 @@ class DiFormer(eqx.Module):
     txt_in: VLinear
     vector_in: MLPEmbedder
     guidance_in: eqx.Module
-    
-    double_blocks: tuple[DoubleStreamBlock]
-    single_blocks: tuple[SingleStreamBlock]
+
+    double_blocks: SequentialScan[DoubleStreamBlock]
+    single_blocks: SequentialScan[SingleStreamBlock]
     final_layer: LastLayer
 
     def __init__(self, config: DiFormerConfig, key: jax.random.PRNGKey):
@@ -467,8 +501,10 @@ class DiFormer(eqx.Module):
             MLPEmbedder(in_dim=self.config.guidance_embed_dim, hidden_dim=config.hidden_size, key=key) if config.guidance_embed else nn.Identity()
         )
         
-        self.double_blocks = tuple(DoubleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth))
-        self.single_blocks = tuple(SingleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth_single_blocks))
+        double_blocks = tuple(DoubleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth))
+        self.double_blocks = SequentialScan(double_blocks)
+        single_blocks = tuple(SingleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth_single_blocks))
+        self.single_blocks = SequentialScan(single_blocks)
     
         self.final_layer = LastLayer(config.hidden_size, 1, config.in_channels, key=key)
 
@@ -510,13 +546,11 @@ class DiFormer(eqx.Module):
         pe = self.pe_embedder(ids)
 
         data = dict(img=img, txt=txt)
-        for block in tqdm(self.double_blocks):
-            data = block(data, vec=vec, pe=pe)
+        data = self.double_blocks(data, vec=vec, pe=pe)
 
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
-        for block in tqdm(self.single_blocks):
-            data = block(data, vec=vec, pe=pe)
+        data = self.single_blocks(data, vec=vec, pe=pe)
         img = img[..., txt.shape[-2]:, :]
 
         img = self.final_layer(img, vec)
@@ -547,4 +581,10 @@ if __name__ == "__main__":
         guidance_scale = jnp.full((n_batch,), 10)
         y = jax.random.normal(key, (n_batch, model.config.vec_in_dim))
 
-        print(model(img=img, txt=txt, timesteps=timesteps, y=y, img_ids=img_ids, guidance=guidance_scale).shape)
+        weights, logic = eqx.partition(model, eqx.is_array)
+        @jax.jit
+        def f(weights, img, txt, timesteps, y, img_ids, guidance_scale):
+            model = eqx.combine(weights, logic)
+            return model(img=img, txt=txt, timesteps=timesteps, y=y, img_ids=img_ids, guidance=guidance_scale)
+
+        print(f(weights, img, txt, timesteps, y, img_ids, guidance_scale))
