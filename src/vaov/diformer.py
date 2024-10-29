@@ -1,11 +1,15 @@
 # https://github.com/black-forest-labs/flux/blob/main/src/flux/model.py
 import equinox as eqx
 from equinox import nn
+from safetensors.numpy import load_file
+from functools import partial
 from dataclasses import dataclass
+from collections import defaultdict
 from jaxtyping import Array, Float, UInt
 from typing import Optional, Tuple
 from .quant import QuantMatrix
 import qax.primitives
+from jax._src import prng
 import jax.numpy as jnp
 from tqdm.auto import tqdm
 from einops import rearrange
@@ -436,11 +440,15 @@ def is_arr(x):
     return isinstance(x, qax.primitives.ArrayValue)
 
 
-def unify(arg, *args):
+def unify(arg, *args, repeat=None):
     if not is_arr(arg):
         return arg
     if isinstance(arg, QuantMatrix):
+        if repeat is not None:
+            args = (arg,) * (repeat - 1)
         return arg.stack(*args)
+    if repeat is not None:
+        return jnp.repeat(arg[None], repeat, axis=0)
     return jnp.stack((arg, *args), axis=0)
 
 
@@ -450,10 +458,9 @@ class SequentialScan(eqx.Module, Generic[T]):
     logic: T
     weights: T
 
-    def __init__(self, layers: tuple[T, ...]):
-        self.weights, self.logic = eqx.partition(
-            jax.tree.map(unify, *layers, is_leaf=is_arr), is_arr
-        )
+    def __init__(self, layers: tuple[T, ...], repeat: int = None):
+        unified = jax.tree.map(partial(unify, repeat=repeat), *layers, is_leaf=is_arr)
+        self.weights, self.logic = eqx.partition(unified, is_arr)
 
     def __call__(self, x, *args, **kwargs):
         def scan_fn(carry, weight: T):
@@ -462,9 +469,14 @@ class SequentialScan(eqx.Module, Generic[T]):
 
         return jax.lax.scan(scan_fn, x, self.weights)[0]
 
+    def __getattr__(self, name):
+        return getattr(self.logic, name)
+
 
 class DiFormer(eqx.Module):
     """Diffusion transformer."""
+    config_cls = DiFormerConfig
+    
     config: DiFormerConfig
     pe_embedder: EmbedND
     time_in: MLPEmbedder
@@ -495,16 +507,21 @@ class DiFormer(eqx.Module):
         self.img_in = VLinear(
             config.in_channels, config.hidden_size, use_bias=True, key=key
         )
-        self.txt_in = VLinear(config.context_in_dim, config.hidden_size, key=key)
+        self.txt_in = VLinear(
+            config.context_in_dim, config.hidden_size, use_bias=True, key=key
+        )
         self.vector_in = MLPEmbedder(config.vec_in_dim, config.hidden_size, key=key)
         self.guidance_in = (
             MLPEmbedder(in_dim=self.config.guidance_embed_dim, hidden_dim=config.hidden_size, key=key) if config.guidance_embed else nn.Identity()
         )
         
-        double_blocks = tuple(DoubleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth))
-        self.double_blocks = SequentialScan(double_blocks)
-        single_blocks = tuple(SingleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth_single_blocks))
-        self.single_blocks = SequentialScan(single_blocks)
+        self.double_blocks = SequentialScan((DoubleStreamBlock(config, key=key),), repeat=config.depth)
+        self.single_blocks = SequentialScan((SingleStreamBlock(config, key=key),), repeat=config.depth_single_blocks)
+
+        # double_blocks = tuple(DoubleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth))
+        # self.double_blocks = SequentialScan(double_blocks)
+        # single_blocks = tuple(SingleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth_single_blocks))
+        # self.single_blocks = SequentialScan(single_blocks)
     
         self.final_layer = LastLayer(config.hidden_size, 1, config.in_channels, key=key)
 
@@ -557,10 +574,100 @@ class DiFormer(eqx.Module):
         
         return img
 
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        model = cls(cls.config_cls, jax.random.key(0, impl=dumb_prng_impl))
+        return load_flux(model, *args, **kwargs)
+
+
+def selector_fn(name):
+    if "." in name:
+        name, _, children = name.partition(".")
+        child_selector = selector_fn(children)
+    else:
+        child_selector = lambda x: x
+    def selector(obj):
+        if all(c.isnumeric() for c in name):
+            return child_selector(obj[int(name)])
+        return child_selector(getattr(obj, name))
+    return selector
+
+
+def load_flux(model, path="somewhere/flux.st"):
+    flux = load_file(path)
+    flux = {k.replace("model.diffusion_model.", ""): v for k, v in flux.items()}
+    flux_aggs = defaultdict(dict)
+    new_flux = {}
+    for key, value in flux.items():
+        if key.startswith("double_blocks") or key.startswith("single_blocks"):
+            base, _, key = key.partition(".")
+            index, _, key = key.partition(".")
+            flux_aggs[f"{base}.{key}"][int(index)] = value
+        else:
+            new_flux[key] = value
+    for key, values in flux_aggs.items():
+        new_weight = jnp.stack([values[i] for i in list(range(max(values.keys()) + 1))], 0)
+        new_flux[key] = new_weight
+    flux = new_flux
+    array_flux = {}
+    nf4_flux = defaultdict(dict)
+    for key, value in flux.items():
+        if ".weight" in key:
+            key, dot_weight, name = key.partition(".weight")
+            nf4_flux[key + dot_weight][name] = value
+        else:
+            array_flux[key] = jnp.asarray(value)
+    for key, values in nf4_flux.items():
+        print({k: (v.shape, v.dtype) for k, v in values.items()})
+    flux = array_flux
+    flux = {k.replace("attn.norm", "attn.qk_norm"): v for k, v in flux.items()}
+    flux = {k.replace("norm.scale", "norm.weight"): v for k, v in flux.items()}
+    for key, value in flux.items():
+        try:
+            model = eqx.tree_at(selector_fn(key), model, value)
+        except ValueError as e:
+            raise ValueError(f"Error at {key}") from e
+        except AttributeError as e:
+            raise AttributeError(f"Error at {key}") from e
+    return model
+
+
+@jax.jit
+def dumb_seed(seed):
+    # sorry for being wasteful, it has to be int32 and non-empty
+    return jnp.empty((1), dtype=jnp.uint32)
+
+# https://github.com/jax-ml/jax/blob/12d26053e31c5c9f45da5a15ce7fb7fcbb0a96b7/jax/_src/prng.py#L1098
+@partial(jax.jit, static_argnums=(1,))
+def dumb_split(key, shape):
+    return jnp.zeros(shape + (1,), dtype=jnp.uint32)
+
+@jax.jit
+def dumb_fold_in(key, data):
+    return key
+
+# https://github.com/jax-ml/jax/blob/12d26053e31c5c9f45da5a15ce7fb7fcbb0a96b7/jax/_src/prng.py#L65
+UINT_DTYPES = {
+    8: jnp.uint8, 16: jnp.uint16, 32: jnp.uint32, 64: jnp.uint64}
+
+# https://github.com/jax-ml/jax/blob/12d26053e31c5c9f45da5a15ce7fb7fcbb0a96b7/jax/_src/prng.py#L1151
+@partial(jax.jit, static_argnums=(1, 2))
+def dumb_bits(key, bit_width, shape):
+    return jnp.zeros(shape, dtype=UINT_DTYPES[bit_width])
+
+
+dumb_prng_impl = prng.PRNGImpl(
+    key_shape=(1,),
+    seed=dumb_seed,
+    split=dumb_split,
+    random_bits=dumb_bits,
+    fold_in=dumb_fold_in,
+)
 
 if __name__ == "__main__":
     with jax.default_device(jax.devices("cpu")[0]):
-        model = DiFormer(DiFormerConfig(), jax.random.PRNGKey(0))
+        model = DiFormer.from_pretrained()
+        exit()
         
         n_batch = 1
         h, w = 32, 32
