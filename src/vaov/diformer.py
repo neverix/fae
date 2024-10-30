@@ -9,6 +9,7 @@ from jaxtyping import Array, Float, UInt
 from typing import Optional, Tuple
 from .quant import QuantMatrix
 import qax.primitives
+import qax
 from jax._src import prng
 import jax.numpy as jnp
 from tqdm.auto import tqdm
@@ -666,8 +667,14 @@ def load_flux(model, path="somewhere/flux.st"):
         assert quants.size == og_size * 2
         scales = values[".absmax"]
         block_size = quants.size // scales.size
-        quants = quants.reshape(*quants.shape[:-2], -1, block_size, og_shape[-1])
-        scales = scales.reshape(*scales.shape[:-1], -1, 1, og_shape[-1])
+        # quants = quants.reshape(*quants.shape[:-2], -1, block_size, og_shape[-1])
+        # scales = scales.reshape(*scales.shape[:-1], -1, 1, og_shape[-1])
+        quants = quants.reshape(*quants.shape[:-2], og_shape[-1], -1, block_size)
+        quants = jnp.swapaxes(quants, -2, -3)
+        quants = jnp.swapaxes(quants, -1, -2)
+        scales = scales.reshape(*scales.shape[:-1], og_shape[-1], -1, 1)
+        scales = jnp.swapaxes(scales, -2, -3)
+        scales = jnp.swapaxes(scales, -1, -2)
         assert (quants.shape[-3] * quants.shape[-2]) == og_shape[-2], f"{key}: {quants.shape} != {og_shape}"
         quant = QuantMatrix(
             shape=og_shape,
@@ -713,20 +720,22 @@ def load_flux(model, path="somewhere/flux.st"):
     flux["single_blocks.attn.o_proj.weight"] = qkv
     flux["single_blocks.mlp.out_proj.weight"] = mlp
     linear2 = flux.pop("single_blocks.linear2.bias")
-    qkv, mlp = (
-        linear2[..., :model.config.hidden_size],
-        linear2[..., model.config.hidden_size:],
-    )
-    flux["single_blocks.attn.o_proj.bias"] = qkv
-    flux["single_blocks.mlp.out_proj.bias"] = mlp
+    flux["single_blocks.attn.o_proj.bias"] = linear2
+    flux["single_blocks.mlp.out_proj.bias"] = linear2 * 0
     norm_keys = [key for key in flux if key.startswith("single_blocks.norm")]
     for key in norm_keys:
         flux[key.replace("single_blocks.norm", "single_blocks.attn.qk_norm")] = flux.pop(key)
     
     # load weights
     for key, value in flux.items():
+        def replace_fn(old):
+            assert old.shape == value.shape, f"{key}: {old.shape} != {value.shape}"
+            v = value
+            if not isinstance(v, QuantMatrix):
+                v = v.astype(old.dtype)
+            return v
         try:
-            model = eqx.tree_at(selector_fn(key), model, value)
+            model = eqx.tree_at(selector_fn(key), model, replace_fn=replace_fn)
         except ValueError as e:
             raise ValueError(f"Error at {key}") from e
         except AttributeError as e:
@@ -769,7 +778,6 @@ dumb_prng_impl = prng.PRNGImpl(
 if __name__ == "__main__":
     with jax.default_device(jax.devices("cpu")[0]):
         model = DiFormer.from_pretrained()
-        exit()
         
         n_batch = 1
         h, w = 32, 32
@@ -792,6 +800,7 @@ if __name__ == "__main__":
 
         weights, logic = eqx.partition(model, eqx.is_array)
         @jax.jit
+        @qax.use_implicit_args
         def f(weights, img, txt, timesteps, y, img_ids, guidance_scale):
             model = eqx.combine(weights, logic)
             return model(img=img, txt=txt, timesteps=timesteps, y=y, img_ids=img_ids, guidance=guidance_scale)

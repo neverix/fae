@@ -194,7 +194,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
             compiler_params=dict(
                 mosaic=dict(dimension_semantics=("parallel", "parallel", "arbitrary"))
             ),
-            interpret=False,
+            interpret=True,
         )(inputs, *tensors)
         if backward:
             outputs = outputs.reshape(outputs.shape[0], -1, 2, block_y // 2).mT.reshape(
