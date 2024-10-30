@@ -305,7 +305,7 @@ class SelfAttention(eqx.Module):
     def __init__(self, dim: int, num_heads: int, qkv_bias: bool = False, *, key: jax.random.PRNGKey):
         self.head_dim = dim // num_heads
         self.qkv_proj = VLinear(dim, dim * 3, use_bias=qkv_bias, key=key)
-        self.o_proj = VLinear(dim, dim, key=key)
+        self.o_proj = VLinear(dim, dim, use_bias=True, key=key)
         self.qk_norm = QKNorm(self.head_dim)
 
     def qkv(self, x):
@@ -658,10 +658,17 @@ def load_flux(model, path="somewhere/flux.st"):
             og_shape = og_tensor.shape
             og_dtype = og_tensor.dtype
         quants = values[""]
+        assert quants.dtype == jnp.uint8
+        og_size = quants.size
+        # quants = jax.lax.bitcast_convert_type(quants, jnp.int4)
+        high, low = jnp.divmod(quants, 16)
+        quants = jnp.stack((high, low), -1).reshape(*quants.shape[:-1], -1)
+        assert quants.size == og_size * 2
         scales = values[".absmax"]
         block_size = quants.size // scales.size
         quants = quants.reshape(*quants.shape[:-2], -1, block_size, og_shape[-1])
         scales = scales.reshape(*scales.shape[:-1], -1, 1, og_shape[-1])
+        assert (quants.shape[-3] * quants.shape[-2]) == og_shape[-2], f"{key}: {quants.shape} != {og_shape}"
         quant = QuantMatrix(
             shape=og_shape,
             dtype=og_dtype,
@@ -686,6 +693,13 @@ def load_flux(model, path="somewhere/flux.st"):
                      size=model.config.mlp_size))
     flux["single_blocks.attn.qkv_proj.weight"] = qkv
     flux["single_blocks.mlp.in_proj.weight"] = mlp
+    linear1 = flux.pop("single_blocks.linear1.bias")
+    qkv, mlp = (
+        linear1[..., :model.config.hidden_size * 3],
+        linear1[..., model.config.hidden_size * 3:],
+    )
+    flux["single_blocks.attn.qkv_proj.bias"] = qkv
+    flux["single_blocks.mlp.in_proj.bias"] = mlp
     linear2 = flux.pop("single_blocks.linear2.weight")
     qkv, mlp = (
         weight_slice(linear2, axis=1, start=0, size=model.config.hidden_size),
@@ -698,6 +712,16 @@ def load_flux(model, path="somewhere/flux.st"):
     )
     flux["single_blocks.attn.o_proj.weight"] = qkv
     flux["single_blocks.mlp.out_proj.weight"] = mlp
+    linear2 = flux.pop("single_blocks.linear2.bias")
+    qkv, mlp = (
+        linear2[..., :model.config.hidden_size],
+        linear2[..., model.config.hidden_size:],
+    )
+    flux["single_blocks.attn.o_proj.bias"] = qkv
+    flux["single_blocks.mlp.out_proj.bias"] = mlp
+    norm_keys = [key for key in flux if key.startswith("single_blocks.norm")]
+    for key in norm_keys:
+        flux[key.replace("single_blocks.norm", "single_blocks.attn.qk_norm")] = flux.pop(key)
     
     # load weights
     for key, value in flux.items():
