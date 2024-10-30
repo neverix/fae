@@ -1,10 +1,12 @@
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Sequence, List
 import jax
 from dataclasses import dataclass
 import dataclasses
 import jax.numpy as jnp
 import numpy as np
 from math import ceil
+from concurrent import futures
+import orbax.checkpoint as ocp
 from functools import partial
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
@@ -316,6 +318,7 @@ def dequantize(quants, scales):
 
     return unquant_matrix
 
+
 @dataclass
 class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
     quants: jnp.ndarray
@@ -327,9 +330,11 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
 
     mesh_and_axis: Optional[Tuple[jax.sharding.Mesh, Optional[int]]] = qax.aux_field()
 
-    def __post_init__(self):
-        self.dtype = self.orig_dtype
-        self.shape = self.quants.shape[:-3] + (
+    def compute_dtype(self):
+        return self.orig_dtype
+
+    def compute_shape(self):
+        return self.quants.shape[:-3] + (
             self.quants.shape[-3] * self.quants.shape[-2],
             self.quants.shape[-1],
         )
@@ -357,9 +362,9 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
         
 
     def materialize(self):
-        if self.use_kernel:
-            # We should never materialize if we're trying to use the kernel
-            raise NotImplementedError
+        # if self.use_kernel:
+        #     # We should never materialize if we're trying to use the kernel
+        #     raise NotImplementedError
 
         return self.dequantize()
 
@@ -589,7 +594,6 @@ def check_accuracy(inputs, matrix, quant_matrix):
     jax.debug.print("{x}, {y}", x=jnp.mean(jnp.abs(result - result_)), y=jnp.mean(jnp.abs(result_)))
     return result_
 
-
 if __name__ == "__main__":
     a, b, c = 512, 512, 512
 
@@ -597,7 +601,51 @@ if __name__ == "__main__":
         inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
         matrix = jax.random.normal(jax.random.key(1), (b, c), dtype=jnp.bfloat16)
 
-    quant_matrix = quantize_matrix(matrix, use_approx=True)
+    quant_matrix = {"a": [quantize_matrix(matrix, use_approx=True)], "b": [quantize_matrix(matrix, use_approx=False)]}
+
+    vals, treedef = jax.tree.flatten(
+        quant_matrix, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
+    )
+    treedef = jax.tree.unflatten(treedef, [jnp.zeros((1,)) for x in vals])
+    new_vals = []
+    for val in vals:
+        if isinstance(val, QuantMatrix):
+            new_vals.append(("qm", val.quants, val.scales, val.use_approx, str(val.orig_dtype), val.use_kernel, val.mesh_and_axis))
+        else:
+            new_vals.append(val)
+    vals = new_vals
+
+    checkpointer = ocp.PyTreeCheckpointer()
+    path = ocp.test_utils.erase_and_create_empty("somewhere/test")
+    path = path.resolve()
+    checkpointer.save(path / "struc", treedef)
+    checkpointer.save(path / "aa", vals)
+    
+    restored_treedef = checkpointer.restore(path / "struc")
+    restored_vals = checkpointer.restore(path / "aa")
+    
+    _, restored_treedef = jax.tree_flatten(
+        restored_treedef, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
+    )
+    new_vals = []
+    for val in restored_vals:
+        if isinstance(val, tuple) and val[0] == "qm":
+            quants, scales, use_approx, orig_dtype, use_kernel, mesh_and_axis = val[1:]
+            orig_dtype = getattr(jnp, orig_dtype)
+            new_vals.append(QuantMatrix(quants, scales, use_approx, orig_dtype, use_kernel, mesh_and_axis))
+        else:
+            new_vals.append(val)
+    restored_quant_matrix = jax.tree_unflatten(restored_treedef, new_vals)
+    print("A")
+    print(quant_matrix["a"][0])
+    print("rA")
+    print(restored_quant_matrix["a"][0])
+    print("B")
+    print(quant_matrix["b"][0])
+    print("rB")
+    print(restored_quant_matrix["b"][0])
+    exit()
+    
     shard_axis = None
     mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, -1, 1), ("dp", "fsdp", "tp"))
     quant_matrix = quant_matrix.with_mesh_and_axis((mesh, shard_axis))

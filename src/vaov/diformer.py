@@ -2,7 +2,7 @@
 import equinox as eqx
 from equinox import nn
 from safetensors.numpy import load_file
-import os
+import shutil
 from functools import partial
 from dataclasses import dataclass
 from collections import defaultdict
@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 from einops import rearrange
 import jax
 import orbax.checkpoint as ocp
+from pathlib import Path
 import math
 import numpy as np
 from loguru import logger
@@ -757,15 +758,23 @@ def preprocess_weights(flux, model):
 
 def load_flux(model, path="somewhere/flux.st", preprocess_into="somewhere/flux_prep"):
     logger.info(f"Loading flux from {path}")
-    if preprocess_into is None or not os.path.exists(preprocess_into):
+    preprocess_into = Path(preprocess_into) if preprocess_into else None
+    if preprocess_into is None or not preprocess_into.exists():
         flux = load_file(path)
         flux = preprocess_weights(flux, model)
-        # TODO: figure out a saving method that can store QuantMatrices
-        # if preprocess_into is not None:
-            # save_file(preprocess_into, flux)
+        if preprocess_into is not None:
+            logger.info("Saving preprocessed flux")
+            path = ocp.test_utils.erase_and_create_empty(preprocess_into)
+            checkpointer = ocp.PyTreeCheckpointer()
+            try:
+                checkpointer.save(preprocess_into / "checkpoint_name", flux)
+            except ValueError:
+                shutil.rmtree(preprocess_into)
+                raise
     else:
-        pass
-        # flux = load_file(preprocess_into)
+        logger.info("Loading preprocessed flux")
+        checkpointer = ocp.PyTreeCheckpointer()
+        flux = checkpointer.restore(preprocess_into / "checkpoint_name")
 
     # load weights
     logger.info("Loading weights")
