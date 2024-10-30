@@ -294,24 +294,29 @@ def matmul_nf4_kernel_transpose(
 def dequantize_group(group, scale, codebook, orig_dtype):
     group = i4tou4(group.astype(np.int32))
 
-    codebook = codebook.astype(orig_dtype)
+    # codebook = codebook.astype(orig_dtype)
 
-    # stacked = nf4xf32_to_f32_select(group)
     stacked = nf4xf32_to_f32(group)
 
-    return (stacked * scale).reshape(-1)
+    return (stacked * scale).reshape(-1).astype(orig_dtype)
 
-def dequantize(quants, scales):
-    codebook = nf4
+
+def dequantize_vmap(quants, scales, *, use_approx, orig_dtype):
+    if quants.ndim > 3:
+        return jax.vmap(
+            partial(dequantize_vmap, use_approx=use_approx, orig_dtype=orig_dtype),
+            in_axes=(0, 0),
+            out_axes=0)(quants, scales)
+
+    codebook = approx_nf4 if use_approx else nf4
 
     group_size = quants.shape[1]
 
-    quants = quants.astype(np.int32)
     grouped = quants.transpose(2, 0, 1).reshape(-1, group_size)
     scales = scales.transpose(2, 0, 1).reshape(-1)
 
     dequantized_groups = jax.vmap(dequantize_group, in_axes=(0, 0, None, None))(
-        grouped, scales, codebook, jnp.bfloat16
+        grouped, scales, codebook, orig_dtype
     )
 
     unquant_matrix = dequantized_groups.reshape(quants.shape[2], -1).T
@@ -320,7 +325,7 @@ def dequantize(quants, scales):
 
 
 @dataclass
-class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
+class QuantMatrix(qax.ImplicitArray, warn_on_materialize=True):
     quants: jnp.ndarray
     scales: jnp.ndarray
 
@@ -329,6 +334,10 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
     orig_dtype: jnp.dtype = qax.aux_field()
 
     mesh_and_axis: Optional[Tuple[jax.sharding.Mesh, Optional[int]]] = qax.aux_field()
+
+    def __post_init__(self):
+        self.dtype = self.compute_dtype()
+        self.shape = self.compute_shape()
 
     def compute_dtype(self):
         return self.orig_dtype
@@ -362,30 +371,15 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
         
 
     def materialize(self):
-        # if self.use_kernel:
+        if self.use_kernel:
         #     # We should never materialize if we're trying to use the kernel
-        #     raise NotImplementedError
+            raise NotImplementedError
 
         return self.dequantize()
 
     def dequantize(self):
-        assert len(self.quants.shape) == 3
-        assert len(self.scales.shape) == 3
-        
-        codebook = approx_nf4 if self.use_approx else nf4
-
-        group_size = self.quants.shape[1]
-
-        grouped = self.quants.transpose(2, 0, 1).reshape(-1, group_size)
-        scales = self.scales.transpose(2, 0, 1).reshape(-1)
-
-        dequantized_groups = jax.vmap(dequantize_group, in_axes=(0, 0, None, None))(
-            grouped, scales, codebook, self.orig_dtype
-        )
-
-        unquant_matrix = dequantized_groups.reshape(self.quants.shape[2], -1).T
-
-        return unquant_matrix
+        return dequantize_vmap(self.quants, self.scales,
+                               use_approx=self.use_approx, orig_dtype=self.orig_dtype)
 
     # @partial(jax.jit, static_argnames=("mesh_and_axis"))
     def with_mesh_and_axis(self, mesh_and_axis):
@@ -595,55 +589,67 @@ def check_accuracy(inputs, matrix, quant_matrix):
     return result_
 
 if __name__ == "__main__":
-    a, b, c = 512, 512, 512
-
     with jax.default_device(jax.devices("cpu")[0]):
+        a, b, c = 512, 512, 512
+
         inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
         matrix = jax.random.normal(jax.random.key(1), (b, c), dtype=jnp.bfloat16)
 
-    quant_matrix = {"a": [quantize_matrix(matrix, use_approx=True)], "b": [quantize_matrix(matrix, use_approx=False)]}
+        quant_matrix = {"a": [quantize_matrix(matrix, use_approx=True)], "b": [quantize_matrix(matrix, use_approx=False)]}
 
-    vals, treedef = jax.tree.flatten(
-        quant_matrix, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
-    )
-    treedef = jax.tree.unflatten(treedef, [jnp.zeros((1,)) for x in vals])
-    new_vals = []
-    for val in vals:
-        if isinstance(val, QuantMatrix):
-            new_vals.append(("qm", val.quants, val.scales, val.use_approx, str(val.orig_dtype), val.use_kernel, val.mesh_and_axis))
-        else:
-            new_vals.append(val)
-    vals = new_vals
+        vals, treedef = jax.tree.flatten(
+            quant_matrix, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
+        )
+        treedef = jax.tree.unflatten(treedef, [jnp.zeros((1,)) for x in vals])
+        new_vals = []
+        shardify = lambda val: jax.device_put(val, jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0]))
+        for val in vals:
+            if isinstance(val, QuantMatrix):
+                quants, scales = shardify((val.quants, val.scales))
+                new_vals.append(("qm", quants, scales, val.use_approx, str(val.orig_dtype), val.use_kernel, val.mesh_and_axis))
+            else:
+                new_vals.append(shardify(val))
+        vals = new_vals
 
-    checkpointer = ocp.PyTreeCheckpointer()
-    path = ocp.test_utils.erase_and_create_empty("somewhere/test")
-    path = path.resolve()
-    checkpointer.save(path / "struc", treedef)
-    checkpointer.save(path / "aa", vals)
-    
-    restored_treedef = checkpointer.restore(path / "struc")
-    restored_vals = checkpointer.restore(path / "aa")
-    
-    _, restored_treedef = jax.tree_flatten(
-        restored_treedef, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
-    )
-    new_vals = []
-    for val in restored_vals:
-        if isinstance(val, tuple) and val[0] == "qm":
-            quants, scales, use_approx, orig_dtype, use_kernel, mesh_and_axis = val[1:]
-            orig_dtype = getattr(jnp, orig_dtype)
-            new_vals.append(QuantMatrix(quants, scales, use_approx, orig_dtype, use_kernel, mesh_and_axis))
-        else:
-            new_vals.append(val)
-    restored_quant_matrix = jax.tree_unflatten(restored_treedef, new_vals)
-    print("A")
-    print(quant_matrix["a"][0])
-    print("rA")
-    print(restored_quant_matrix["a"][0])
-    print("B")
-    print(quant_matrix["b"][0])
-    print("rB")
-    print(restored_quant_matrix["b"][0])
+        checkpointer = ocp.PyTreeCheckpointer()
+        path = ocp.test_utils.erase_and_create_empty("somewhere/test")
+        path = path.resolve()
+        checkpointer.save(path / "struc", treedef)
+        checkpointer.save(path / "aa", vals)
+        
+        checkpointer = ocp.PyTreeCheckpointer()
+        treedef_meta = checkpointer.metadata(path / "struc")
+        sharding = jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0])
+        restore_args = ocp.checkpoint_utils.construct_restore_args(
+            treedef_meta,
+            sharding_tree=jax.tree.map(lambda _: sharding, treedef_meta)
+        )
+        restored_treedef = checkpointer.restore(path / "struc",
+                                                restore_args=restore_args)
+        vals_meta = checkpointer.metadata(path / "aa")
+        sharding = jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0])
+        restore_args = ocp.checkpoint_utils.construct_restore_args(
+            vals_meta,
+            sharding_tree=jax.tree.map(lambda _: sharding, vals_meta)
+        )
+        restored_vals = checkpointer.restore(path / "aa",
+                                                restore_args=restore_args)
+        
+        _, restored_treedef = jax.tree_flatten(
+            restored_treedef, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
+        )
+        new_vals = []
+        for val in restored_vals:
+            if isinstance(val, list) and val[0] == "qm":
+                quants, scales, use_approx, orig_dtype, use_kernel, mesh_and_axis = val[1:]
+                new_vals.append(QuantMatrix(
+                    quants=quants, scales=scales,
+                    use_approx=use_approx, orig_dtype=orig_dtype,
+                    use_kernel=use_kernel, mesh_and_axis=mesh_and_axis))
+            else:
+                new_vals.append(val)
+        restored_quant_matrix = jax.tree_unflatten(restored_treedef, new_vals)
+        print(jax.tree.map(lambda a, b: (a == b).all(), restored_quant_matrix, quant_matrix))
     exit()
     
     shard_axis = None
