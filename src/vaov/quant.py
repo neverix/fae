@@ -194,7 +194,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
             compiler_params=dict(
                 mosaic=dict(dimension_semantics=("parallel", "parallel", "arbitrary"))
             ),
-            interpret=True,
+            interpret=False,
         )(inputs, *tensors)
         if backward:
             outputs = outputs.reshape(outputs.shape[0], -1, 2, block_y // 2).mT.reshape(
@@ -384,14 +384,21 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=False):
 
     # @partial(jax.jit, static_argnames=("mesh_and_axis"))
     def with_mesh_and_axis(self, mesh_and_axis):
+        batch_dims = (None,) * (self.quants.ndim - 3)
         new_quant_matrix = dataclasses.replace(self, mesh_and_axis=mesh_and_axis)
         mesh, shard_axis = mesh_and_axis
         if shard_axis == 0:
-            quant_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("tp", None, None))
+            quant_sharding = jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(*batch_dims, "tp", None, None)
+            )
         elif shard_axis == 1:
-            quant_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "tp"))
+            quant_sharding = jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(*batch_dims, None, None, "tp")
+            )
         elif shard_axis is None:
-            quant_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "fsdp"))
+            quant_sharding = jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(*batch_dims, None, None, "fsdp")
+            )
         new_quant_matrix = jax.device_put(new_quant_matrix, quant_sharding)
         return new_quant_matrix
 
@@ -422,6 +429,9 @@ def dot_general_handler(
         # No kernel for NF4
         return NotImplemented
 
+    og_dtype = a.dtype
+    compute_dtype = jnp.bfloat16  # just so there's no confusion
+    a = a.astype(compute_dtype)
 
     if b.mesh_and_axis is not None:
         mesh, map_axis = b.mesh_and_axis
@@ -496,7 +506,7 @@ def dot_general_handler(
         orig_a_shape = a.shape
         a = a.reshape(-1, b.shape[0])
         out = matmul_fast(a, b.quants, b.scales, kernel=matmul_nf4_kernel)
-    return out.reshape(*orig_a_shape[:-1], out.shape[-1])
+    return out.reshape(*orig_a_shape[:-1], out.shape[-1]).astype(og_dtype)
 
 
 def quantize_groups(group, codebook):

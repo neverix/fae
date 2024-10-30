@@ -2,6 +2,7 @@
 import equinox as eqx
 from equinox import nn
 from safetensors.numpy import load_file
+import os
 from functools import partial
 from dataclasses import dataclass
 from collections import defaultdict
@@ -10,12 +11,16 @@ from typing import Optional, Tuple
 from .quant import QuantMatrix
 import qax.primitives
 import qax
+from jax.experimental import mesh_utils
 from jax._src import prng
 import jax.numpy as jnp
 from tqdm.auto import tqdm
 from einops import rearrange
 import jax
+import orbax.checkpoint as ocp
 import math
+import numpy as np
+from loguru import logger
 from typing import TypeVar, Generic
 
 @dataclass(frozen=True)
@@ -69,6 +74,9 @@ def attention(
     v: Float[Array, "*batch n_seq n_heads d_head"],
     pe: Float[Array, "*batch n_seq d_head 2 2"],
 ) -> Float[Array, "*batch n_seq (n_heads d_head)"]:
+    if q.ndim > 4:
+        return jax.vmap(attention, in_axes=(0, 0, 0, 0))(q, k, v, pe)
+
     q, k = apply_rope(q, k, pe)
 
     x = jax.nn.dot_product_attention(q, k, v)
@@ -248,8 +256,9 @@ class QKNorm(eqx.Module):
     key_norm: nn.RMSNorm
 
     def __init__(self, dim: int):
-        self.query_norm = nn.RMSNorm(dim)
-        self.key_norm = nn.RMSNorm(dim)
+        # what's the point of weights on both queries and keys?..
+        self.query_norm = nn.RMSNorm(dim, use_weight=True, use_bias=False)
+        self.key_norm = nn.RMSNorm(dim, use_weight=True, use_bias=False)
 
     def apply_norm(self, x: Float[Array, "*batch dim"], norm: nn.RMSNorm) -> Float[Array, "*batch dim"]:
         if len(x.shape) > len(norm.shape):
@@ -579,8 +588,11 @@ class DiFormer(eqx.Module):
         return img
 
     @classmethod
-    def from_pretrained(cls, *args, **kwargs):
-        model = cls(cls.config_cls(), jax.random.key(0, impl=dumb_prng_impl))
+    def from_pretrained(cls, *args, custom_config=None, **kwargs):
+        logger.info("Loading DiFormer model")
+        if custom_config is None:
+            custom_config = cls.config_cls()
+        model = cls(custom_config, jax.random.key(0, impl=dumb_prng_impl))
         return load_flux(model, *args, **kwargs)
 
 
@@ -603,9 +615,10 @@ def weight_slice(arr, *, axis: int, start: int, size: int):
     return jax.lax.dynamic_slice_in_dim(arr, start, size, axis=axis)
 
 
-def load_flux(model, path="somewhere/flux.st"):
-    flux = load_file(path)
+def preprocess_weights(flux, model):
     flux = {k.replace("model.diffusion_model.", ""): v for k, v in flux.items()}
+    
+    logger.info("Layer-stacking arrays")
     flux_aggs = defaultdict(dict)
     new_flux = {}
     for key, value in flux.items():
@@ -616,7 +629,9 @@ def load_flux(model, path="somewhere/flux.st"):
         else:
             new_flux[key] = value
     for key, values in flux_aggs.items():
-        new_weight = jnp.stack([values[i] for i in list(range(max(values.keys()) + 1))], 0)
+        new_weight = jnp.stack(
+            [values[i] for i in list(range(max(values.keys()) + 1))], 0
+        )
         new_flux[key] = new_weight
     flux = new_flux
 
@@ -625,8 +640,9 @@ def load_flux(model, path="somewhere/flux.st"):
     flux = {k.replace("attn.qkv.", "attn.qkv_proj."): v for k, v in flux.items()}
     flux = {k.replace("mlp.0.", "mlp.in_proj."): v for k, v in flux.items()}
     flux = {k.replace("mlp.2.", "mlp.out_proj."): v for k, v in flux.items()}
-    
+
     # fold in nf4 arrays
+    logger.info("Loading in quantized arrays")
     array_flux = {}
     nf4_flux = defaultdict(dict)
     for key, value in flux.items():
@@ -647,7 +663,11 @@ def load_flux(model, path="somewhere/flux.st"):
             )
             og_dtype = jnp.bfloat16
         elif key == "single_blocks.linear2.weight":
-            og_shape = (model.config.depth_single_blocks, model.config.hidden_size + model.config.mlp_size, model.config.hidden_size)
+            og_shape = (
+                model.config.depth_single_blocks,
+                model.config.hidden_size + model.config.mlp_size,
+                model.config.hidden_size,
+            )
             og_dtype = jnp.bfloat16
         else:
             try:
@@ -675,7 +695,9 @@ def load_flux(model, path="somewhere/flux.st"):
         scales = scales.reshape(*scales.shape[:-1], og_shape[-1], -1, 1)
         scales = jnp.swapaxes(scales, -2, -3)
         scales = jnp.swapaxes(scales, -1, -2)
-        assert (quants.shape[-3] * quants.shape[-2]) == og_shape[-2], f"{key}: {quants.shape} != {og_shape}"
+        assert (quants.shape[-3] * quants.shape[-2]) == og_shape[
+            -2
+        ], f"{key}: {quants.shape} != {og_shape}"
         quant = QuantMatrix(
             shape=og_shape,
             dtype=og_dtype,
@@ -684,26 +706,29 @@ def load_flux(model, path="somewhere/flux.st"):
             use_approx=True,
             use_kernel=True,
             orig_dtype=og_tensor.dtype,
-            mesh_and_axis=None
+            mesh_and_axis=None,
         )
         array_flux[key] = quant
     flux = array_flux
 
+    logger.info("Splitting linear1/linear2")
     flux = {k.replace("norm.scale", "norm.weight"): v for k, v in flux.items()}
     linear1 = flux.pop("single_blocks.linear1.weight")
     qkv, mlp = (
-        weight_slice(linear1, axis=-1,
-                     start=0,
-                     size=model.config.hidden_size * 3),
-        weight_slice(linear1, axis=-1,
-                     start=model.config.hidden_size * 3,
-                     size=model.config.mlp_size))
+        weight_slice(linear1, axis=-1, start=0, size=model.config.hidden_size * 3),
+        weight_slice(
+            linear1,
+            axis=-1,
+            start=model.config.hidden_size * 3,
+            size=model.config.mlp_size,
+        ),
+    )
     flux["single_blocks.attn.qkv_proj.weight"] = qkv
     flux["single_blocks.mlp.in_proj.weight"] = mlp
     linear1 = flux.pop("single_blocks.linear1.bias")
     qkv, mlp = (
-        linear1[..., :model.config.hidden_size * 3],
-        linear1[..., model.config.hidden_size * 3:],
+        linear1[..., : model.config.hidden_size * 3],
+        linear1[..., model.config.hidden_size * 3 :],
     )
     flux["single_blocks.attn.qkv_proj.bias"] = qkv
     flux["single_blocks.mlp.in_proj.bias"] = mlp
@@ -724,9 +749,26 @@ def load_flux(model, path="somewhere/flux.st"):
     flux["single_blocks.mlp.out_proj.bias"] = linear2 * 0
     norm_keys = [key for key in flux if key.startswith("single_blocks.norm")]
     for key in norm_keys:
-        flux[key.replace("single_blocks.norm", "single_blocks.attn.qk_norm")] = flux.pop(key)
-    
+        flux[key.replace("single_blocks.norm", "single_blocks.attn.qk_norm")] = (
+            flux.pop(key)
+        )
+    return flux
+
+
+def load_flux(model, path="somewhere/flux.st", preprocess_into="somewhere/flux_prep"):
+    logger.info(f"Loading flux from {path}")
+    if preprocess_into is None or not os.path.exists(preprocess_into):
+        flux = load_file(path)
+        flux = preprocess_weights(flux, model)
+        # TODO: figure out a saving method that can store QuantMatrices
+        # if preprocess_into is not None:
+            # save_file(preprocess_into, flux)
+    else:
+        pass
+        # flux = load_file(preprocess_into)
+
     # load weights
+    logger.info("Loading weights")
     for key, value in flux.items():
         def replace_fn(old):
             assert old.shape == value.shape, f"{key}: {old.shape} != {value.shape}"
@@ -740,6 +782,7 @@ def load_flux(model, path="somewhere/flux.st"):
             raise ValueError(f"Error at {key}") from e
         except AttributeError as e:
             raise AttributeError(f"Error at {key}") from e
+
     return model
 
 
@@ -777,32 +820,66 @@ dumb_prng_impl = prng.PRNGImpl(
 
 if __name__ == "__main__":
     with jax.default_device(jax.devices("cpu")[0]):
+        logger.info("Creating model")
         model = DiFormer.from_pretrained()
+
+        logger.info("Creating inputs")
         
-        n_batch = 1
+        batch_dims = (16, 16)
         h, w = 32, 32
         n_seq = h * w
         n_seq_txt = 128
         
         key = jax.random.PRNGKey(0)
+        dtype = jnp.bfloat16
 
-        img = jax.random.normal(key, (n_batch, n_seq, model.config.in_channels))
-        txt = jax.random.normal(key, (n_batch, n_seq_txt, model.config.context_in_dim))
-        timesteps = jax.random.uniform(key, (n_batch,))
+        img = jax.random.normal(key, (*batch_dims, n_seq, model.config.in_channels), dtype=dtype)
+        txt = jax.random.normal(key, (*batch_dims, n_seq_txt, model.config.context_in_dim), dtype=dtype)
+        timesteps = jax.random.uniform(key, (*batch_dims,))
 
-        img_ids = jnp.zeros((n_batch, h, w, 3), dtype=jnp.uint32)
+        img_ids = jnp.zeros((*batch_dims, h, w, 3), dtype=jnp.uint32)
         img_ids = img_ids.at[..., 1].add(jnp.arange(h)[:, None])
         img_ids = img_ids.at[..., 2].add(jnp.arange(w)[None, :])
-        img_ids = img_ids.reshape(n_batch, -1, 3)
+        img_ids = img_ids.reshape(*batch_dims, -1, 3)
 
-        guidance_scale = jnp.full((n_batch,), 10)
-        y = jax.random.normal(key, (n_batch, model.config.vec_in_dim))
+        guidance_scale = jnp.full((*batch_dims,), 10, dtype=dtype)
+        y = jax.random.normal(key, (*batch_dims, model.config.vec_in_dim), dtype=dtype)
 
         weights, logic = eqx.partition(model, eqx.is_array)
-        @jax.jit
-        @qax.use_implicit_args
-        def f(weights, img, txt, timesteps, y, img_ids, guidance_scale):
-            model = eqx.combine(weights, logic)
-            return model(img=img, txt=txt, timesteps=timesteps, y=y, img_ids=img_ids, guidance=guidance_scale)
 
-        print(f(weights, img, txt, timesteps, y, img_ids, guidance_scale))
+    @jax.jit
+    @qax.use_implicit_args
+    def f(weights, img, txt, timesteps, y, img_ids, guidance_scale):
+        model = eqx.combine(weights, logic)
+        return model(img=img, txt=txt, timesteps=timesteps, y=y, img_ids=img_ids, guidance=guidance_scale)
+
+    logger.info("Loading model into mesh")
+    shape_request = (-1, 2, 1)
+    device_count = jax.device_count("tpu")
+    mesh_shape = np.arange(device_count).reshape(*shape_request).shape
+    physical_mesh = mesh_utils.create_device_mesh(mesh_shape)
+    mesh = jax.sharding.Mesh(physical_mesh, ("dp", "fsdp", "tp"))
+    mesh_and_axis = (mesh, None)  # FSDP
+    def to_mesh(arr):
+        if not is_arr(arr):
+            return arr
+        if isinstance(arr, QuantMatrix):
+            return arr.with_mesh_and_axis(mesh_and_axis)
+        return jax.device_put(arr,
+                              jax.sharding.NamedSharding(
+                                  mesh,
+                                  jax.sharding.PartitionSpec(*((None,) * (arr.ndim)))))
+    weights = jax.tree.map(to_mesh, weights, is_leaf=is_arr)
+
+    logger.info("Loading inputs into mesh")
+    args = img, txt, timesteps, y, img_ids, guidance_scale
+    args = [
+        jax.device_put(
+            arg,
+            jax.sharding.NamedSharding(mesh,
+                                       jax.sharding.PartitionSpec(
+                                           "dp", "fsdp", *((None,) * (arg.ndim - 2)))))
+        for arg in args]
+
+    logger.info("Running model")
+    print(f(weights, *args))
