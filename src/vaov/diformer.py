@@ -2,6 +2,7 @@
 import equinox as eqx
 from equinox import nn
 from safetensors.numpy import load_file
+import ml_dtypes
 import shutil
 from functools import partial
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from jax.experimental import mesh_utils
 from jax._src import prng
 import jax.numpy as jnp
 from tqdm.auto import tqdm
+from .vae import FluxVAE
 from einops import rearrange
 import jax
 import orbax.checkpoint as ocp
@@ -875,33 +877,59 @@ dumb_prng_impl = prng.PRNGImpl(
 )
 
 if __name__ == "__main__":
+    logger.info("Creating inputs")
+    
+    batch_dims = (16, 16)
+
+    key = jax.random.PRNGKey(0)
+    dtype = jnp.bfloat16
+
+    vae = FluxVAE(
+        "somewhere/taef1/taef1_encoder.onnx", "somewhere/taef1/taef1_decoder.onnx"
+    )
+
+    import requests
+    from PIL import Image
+    dog_image_url = "https://www.akc.org/wp-content/uploads/2017/11/Shiba-Inu-standing-in-profile-outdoors.jpg"
+    dog_image = Image.open(requests.get(dog_image_url, stream=True).raw)
+    encoded = vae.encode(vae.preprocess(dog_image))
+    if encoded.shape[-1] % 2:
+        encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 0), (0, 1)))
+    if encoded.shape[-2] % 2:
+        encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 1), (0, 0)))
+
+    import torch
+    text_encodings = torch.load("somewhere/res.pt", map_location=torch.device("cpu"), weights_only=True)
+    t5_emb, clip_emb = (x.detach().cpu().float().numpy().astype(ml_dtypes.bfloat16) for x in text_encodings[:2])
+    n_seq_txt = t5_emb.shape[1]
+
     with jax.default_device(jax.devices("cpu")[0]):
         logger.info("Creating model")
         model = DiFormer.from_pretrained()
 
-        logger.info("Creating inputs")
-        
-        batch_dims = (16, 16)
-        h, w = 32, 32
-        n_seq = h * w
-        n_seq_txt = 128
-        
-        key = jax.random.PRNGKey(0)
-        dtype = jnp.bfloat16
+    def pad_to_batch(x):
+        return jnp.repeat(x, np.prod(batch_dims), axis=0).reshape(
+            *batch_dims, *x.shape[1:]
+        )
 
-        img = jax.random.normal(key, (*batch_dims, n_seq, model.config.in_channels), dtype=dtype)
-        txt = jax.random.normal(key, (*batch_dims, n_seq_txt, model.config.context_in_dim), dtype=dtype)
-        timesteps = jax.random.uniform(key, (*batch_dims,))
+    timesteps = jnp.full((*batch_dims,), 0.5, dtype=jnp.float32)
+    txt = pad_to_batch(jnp.asarray(t5_emb, dtype))
 
-        img_ids = jnp.zeros((*batch_dims, h, w, 3), dtype=jnp.uint32)
-        img_ids = img_ids.at[..., 1].add(jnp.arange(h)[:, None])
-        img_ids = img_ids.at[..., 2].add(jnp.arange(w)[None, :])
-        img_ids = img_ids.reshape(*batch_dims, -1, 3)
+    patched = rearrange(encoded, "b c (h ph) (w pw) -> b h w (c ph pw)", ph=2, pw=2)
+    h, w = patched.shape[-3:-1]
+    n_seq = h * w
+    patched = pad_to_batch(patched)
+    img = jnp.astype(patched, dtype)
 
-        guidance_scale = jnp.full((*batch_dims,), 10, dtype=dtype)
-        y = jax.random.normal(key, (*batch_dims, model.config.vec_in_dim), dtype=dtype)
+    img_ids = jnp.zeros((*batch_dims, h, w, 3), dtype=jnp.uint32)
+    img_ids = img_ids.at[..., 1].add(jnp.arange(h)[:, None])
+    img_ids = img_ids.at[..., 2].add(jnp.arange(w)[None, :])
+    img_ids = img_ids.reshape(*batch_dims, -1, 3)
 
-        weights, logic = eqx.partition(model, eqx.is_array)
+    guidance_scale = jnp.full((*batch_dims,), 1, dtype=dtype)
+    y = pad_to_batch(clip_emb)
+
+    weights, logic = eqx.partition(model, eqx.is_array)
 
     @jax.jit
     @qax.use_implicit_args
@@ -938,4 +966,6 @@ if __name__ == "__main__":
         for arg in args]
 
     logger.info("Running model")
-    print(f(weights, *args))
+    output = f(weights, *args)
+    unpatched = rearrange(output, "b h w (c ph pw) -> b c (h ph) (w pw)", ph=2, pw=2)
+    print(jnp.mean(jnp.abs(unpatched)), jnp.mean(jnp.abs(output)))
