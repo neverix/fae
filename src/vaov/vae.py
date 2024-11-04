@@ -1,4 +1,5 @@
 from jaxonnxruntime import backend as jax_backend
+from PIL import Image
 import equinox as eqx
 import numpy as np
 import onnx

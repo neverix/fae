@@ -825,7 +825,7 @@ def save_quantized(a):
     return treedef, vals
 
 def load_quantized(restored_treedef, restored_vals):
-    _, restored_treedef = jax.tree_flatten(
+    _, restored_treedef = jax.tree.flatten(
         restored_treedef, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
     )
     new_vals = []
@@ -838,7 +838,7 @@ def load_quantized(restored_treedef, restored_vals):
                 use_kernel=use_kernel, mesh_and_axis=mesh_and_axis))
         else:
             new_vals.append(val)
-    restored_a = jax.tree_unflatten(restored_treedef, new_vals)
+    restored_a = jax.tree.unflatten(restored_treedef, new_vals)
     return restored_a
 
 
@@ -964,10 +964,14 @@ if __name__ == "__main__":
             *batch_dims, *x.shape[1:]
         )
 
-    timesteps = jnp.full((*batch_dims,), 0.5, dtype=jnp.float32)
+    timesteps = jnp.full((1,), 0.05, dtype=jnp.float32)
+    noise = jax.random.normal(key, encoded.shape, dtype=dtype)
+    t = timesteps[..., None, None, None]
+    noised = encoded * t + noise * (1 - t)
+    timesteps = pad_to_batch(timesteps)
     txt = pad_to_batch(jnp.asarray(t5_emb, dtype))
 
-    patched = rearrange(encoded, "b c (h ph) (w pw) -> b h w (c ph pw)", ph=2, pw=2)
+    patched = rearrange(noised, "b c (h ph) (w pw) -> b h w (c ph pw)", ph=2, pw=2)
     h, w = patched.shape[-3:-1]
     patched = rearrange(patched, "b h w c -> b (h w) c")
     n_seq = patched.shape[-2]
@@ -1020,6 +1024,9 @@ if __name__ == "__main__":
 
     logger.info("Running model")
     output = f(weights, *args)
-    unpatched = rearrange(output, "b d (h w) (c ph pw) -> (b d) c (h ph) (w pw)",
-                          ph=2, pw=2, h=h, w=w)
-    print(jnp.mean(jnp.abs(unpatched)), jnp.mean(jnp.abs(output)))
+    prediction = rearrange(output, "b d (h w) (c ph pw) -> (b d) c (h ph) (w pw)",
+                          ph=2, pw=2, h=h, w=w)[0, :1]
+    denoised = noised - t * prediction
+    print(jnp.mean(jnp.abs(prediction)), jnp.mean(jnp.abs(encoded)), jnp.mean(jnp.abs(denoised)))
+    generated = vae.deprocess(vae.decode(denoised))
+    generated.save("somewhere/denoised.jpg")
