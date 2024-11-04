@@ -964,10 +964,10 @@ if __name__ == "__main__":
             *batch_dims, *x.shape[1:]
         )
 
-    timesteps = jnp.full((1,), 0.05, dtype=jnp.float32)
+    timesteps = jnp.full((1,), 0.1, dtype=jnp.float32)
     noise = jax.random.normal(key, encoded.shape, dtype=dtype)
     t = timesteps[..., None, None, None]
-    noised = encoded * t + noise * (1 - t)
+    noised = encoded * (1 - t) + noise * t
     timesteps = pad_to_batch(timesteps)
     txt = pad_to_batch(jnp.asarray(t5_emb, dtype))
 
