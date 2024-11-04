@@ -1,18 +1,22 @@
 # https://github.com/black-forest-labs/flux/blob/main/src/flux/model.py
 import equinox as eqx
 from equinox import nn
+import jax.experimental
+import jax.experimental.shard_map
 from safetensors.numpy import load_file
 import ml_dtypes
 import shutil
 from functools import partial
 from dataclasses import dataclass
 from collections import defaultdict
-from jaxtyping import Array, Float, UInt
+from jaxtyping import Array, Float, UInt, Bool
 from typing import Optional, Tuple
 from .quant import QuantMatrix
 import qax.primitives
 import qax
 from jax.experimental import mesh_utils
+from jax.sharding import PartitionSpec as P
+from jax.experimental.pallas.ops.tpu import flash_attention
 from jax._src import prng
 import jax.numpy as jnp
 from tqdm.auto import tqdm
@@ -76,14 +80,45 @@ def attention(
     k: Float[Array, "*batch n_seq n_heads d_head"],
     v: Float[Array, "*batch n_seq n_heads d_head"],
     pe: Float[Array, "*batch n_seq d_head 2 2"],
+    mask: Optional[Bool[Array, "*batch n_seq n_seq"]] = None,
 ) -> Float[Array, "*batch n_seq (n_heads d_head)"]:
     if q.ndim > 4:
-        return jax.vmap(attention, in_axes=(0, 0, 0, 0))(q, k, v, pe)
+        if mask is not None:  # flash
+            assert q.ndim == 5
+            def per_block(q, k, v, pe, mask):
+                og_batch_dims = q.shape[:-3]
+                q = q.reshape(-1, *q.shape[-3:])
+                k = k.reshape(-1, *k.shape[-3:])
+                v = v.reshape(-1, *v.shape[-3:])
+                pe = pe.reshape(-1, *pe.shape[len(og_batch_dims):])
+                mask = mask.reshape(-1, *mask.shape[len(og_batch_dims):])
+                x = attention(q, k, v, pe, mask)
+                # print(q.shape, k.shape, v.shape, pe.shape, mask.shape, x.shape)
+                return x.reshape(*og_batch_dims, *x.shape[-2:])
+            args = (q, k, v, pe, mask)
+            return jax.experimental.shard_map.shard_map(
+                per_block, mesh,
+                in_specs=tuple(P("dp", "fsdp", *((None,) * (x.ndim - 3))) for x in args),
+                out_specs=P("dp", "fsdp", None, None),
+                check_rep=False
+            )(*args)
+        else:
+            return jax.vmap(attention, in_axes=(0, 0, 0, 0))(q, k, v, pe)
 
     q, k = apply_rope(q, k, pe)
 
-    x = jax.nn.dot_product_attention(q, k, v)
-    x = rearrange(x, "... h d -> ... (h d)")
+    # x = jax.nn.dot_product_attention(q, k, v, mask=mask)
+    # x = rearrange(x, "... h d -> ... (h d)")
+    segment_ids = None
+    if mask is not None:
+        q_segment_ids = mask.astype(jnp.int32)
+        kv_segment_ids = mask.astype(jnp.int32)
+        segment_ids = flash_attention.SegmentIds(q=q_segment_ids, kv=kv_segment_ids)
+    q = q.transpose((0, 2, 1, 3))
+    k = k.transpose((0, 2, 1, 3))
+    v = v.transpose((0, 2, 1, 3))
+    x = flash_attention.flash_attention(q, k, v, segment_ids=segment_ids)
+    x = rearrange(x, "... h s d -> ... s (h d)")
 
     return x
 
@@ -332,9 +367,9 @@ class SelfAttention(eqx.Module):
         q, k = self.qk_norm(q, k, v)
         return q, k, v
 
-    def __call__(self, x, pe):
+    def __call__(self, x, pe, mask=None):
         q, k, v = self.qkv(x)
-        attn = attention(q, k, v, pe=pe)
+        attn = attention(q, k, v, pe=pe, mask=mask)
         return self.o_proj(attn)
 
 class MLP(eqx.Module):
@@ -387,7 +422,7 @@ class DoubleStreamBlock(eqx.Module):
             MLP(config, key=k) for k in jax.random.split(key, 2)
         )
 
-    def __call__(self, data, vec, pe):
+    def __call__(self, data, vec, pe, mask=None):
         img, txt = data["img"], data["txt"]
         txt_len = txt.shape[-2]
 
@@ -406,7 +441,7 @@ class DoubleStreamBlock(eqx.Module):
         k = jnp.concatenate((txt_k, img_k), axis=-3)
         v = jnp.concatenate((txt_v, img_v), axis=-3)
         
-        attn = attention(q, k, v, pe)
+        attn = attention(q, k, v, pe, mask=mask)
         txt_attn, img_attn = attn[..., :txt_len, :], attn[..., txt_len:, :]
 
         img = img + img_mod1.gate * self.img_attn.o_proj(img_attn)
@@ -441,12 +476,12 @@ class SingleStreamBlock(eqx.Module):
         
         self.modulation = Modulation(config.hidden_size, double=False, key=key)
     
-    def __call__(self, data, vec, pe):
+    def __call__(self, data, vec, pe, mask=None):
         mod, _ = self.modulation(vec)
         x = self.pre_norm(data)
         x = mod(x)
         
-        attn_out = self.attn(x, pe)
+        attn_out = self.attn(x, pe, mask=mask)
         mlp_out = self.mlp(x)
 
         return x + mod.gate * (attn_out + mlp_out)
@@ -487,6 +522,17 @@ class SequentialScan(eqx.Module, Generic[T]):
 
     def __getattr__(self, name):
         return getattr(self.weights, name)
+
+
+def pad_and_mask(x, pad_to=128):
+    current_len = x.shape[-2]
+    if current_len % pad_to == 0:
+        return x, jnp.ones(x.shape[:-1], dtype=jnp.bool_)
+    pad = pad_to - current_len % pad_to
+    x = jnp.pad(x, ((0, 0),) * (x.ndim - 2) + ((0, pad), (0, 0)))
+    mask = jnp.ones(x.shape[:-1], dtype=jnp.bool_)
+    mask = mask.at[..., -pad].set(False)
+    return x, mask
 
 
 class DiFormer(eqx.Module):
@@ -530,14 +576,14 @@ class DiFormer(eqx.Module):
         self.guidance_in = (
             MLPEmbedder(in_dim=self.config.guidance_embed_dim, hidden_dim=config.hidden_size, key=key) if config.guidance_embed else nn.Identity()
         )
-        
-        self.double_blocks = SequentialScan((DoubleStreamBlock(config, key=key),), repeat=config.depth)
-        self.single_blocks = SequentialScan((SingleStreamBlock(config, key=key),), repeat=config.depth_single_blocks)
 
         # double_blocks = tuple(DoubleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth))
         # self.double_blocks = SequentialScan(double_blocks)
         # single_blocks = tuple(SingleStreamBlock(config, key=k) for k in jax.random.split(key, config.depth_single_blocks))
         # self.single_blocks = SequentialScan(single_blocks)
+
+        self.double_blocks = SequentialScan((DoubleStreamBlock(config, key=key),), repeat=config.depth)
+        self.single_blocks = SequentialScan((SingleStreamBlock(config, key=key),), repeat=config.depth_single_blocks)
     
         self.final_layer = LastLayer(config.hidden_size, 1, config.in_channels, key=key)
 
@@ -573,18 +619,24 @@ class DiFormer(eqx.Module):
 
         txt = self.txt_in(txt)
         
+        orig_img_len = img.shape[-2]
+        img, img_mask = pad_and_mask(img)
+        txt, txt_mask = pad_and_mask(txt)
+        
         if txt_ids is None:
             txt_ids = jnp.zeros(txt.shape[:-1] + (3,), dtype=jnp.uint32)
+        img_ids = pad_and_mask(img_ids)[0]
         ids = jnp.concatenate((txt_ids, img_ids), axis=-2)
         pe = self.pe_embedder(ids)
-
+        
+        mask = jnp.concatenate((txt_mask, img_mask), -1)
         data = dict(img=img, txt=txt)
-        data = self.double_blocks(data, vec=vec, pe=pe)
+        data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
 
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
-        data = self.single_blocks(data, vec=vec, pe=pe)
-        img = img[..., txt.shape[-2]:, :]
+        data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
+        img = img[..., :orig_img_len, :]
 
         img = self.final_layer(img, vec)
         
@@ -879,7 +931,7 @@ dumb_prng_impl = prng.PRNGImpl(
 if __name__ == "__main__":
     logger.info("Creating inputs")
     
-    batch_dims = (16, 16)
+    batch_dims = (4, 4)
 
     key = jax.random.PRNGKey(0)
     dtype = jnp.bfloat16
@@ -968,5 +1020,6 @@ if __name__ == "__main__":
 
     logger.info("Running model")
     output = f(weights, *args)
-    unpatched = rearrange(output, "b (h w) (c ph pw) -> b c (h ph) (w pw)", ph=2, pw=2)
+    unpatched = rearrange(output, "b d (h w) (c ph pw) -> (b d) c (h ph) (w pw)",
+                          ph=2, pw=2, h=h, w=w)
     print(jnp.mean(jnp.abs(unpatched)), jnp.mean(jnp.abs(output)))
