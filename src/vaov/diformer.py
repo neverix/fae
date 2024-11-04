@@ -917,7 +917,8 @@ if __name__ == "__main__":
 
     patched = rearrange(encoded, "b c (h ph) (w pw) -> b h w (c ph pw)", ph=2, pw=2)
     h, w = patched.shape[-3:-1]
-    n_seq = h * w
+    patched = rearrange(patched, "b h w c -> b (h w) c")
+    n_seq = patched.shape[-2]
     patched = pad_to_batch(patched)
     img = jnp.astype(patched, dtype)
 
@@ -967,5 +968,5 @@ if __name__ == "__main__":
 
     logger.info("Running model")
     output = f(weights, *args)
-    unpatched = rearrange(output, "b h w (c ph pw) -> b c (h ph) (w pw)", ph=2, pw=2)
+    unpatched = rearrange(output, "b (h w) (c ph pw) -> b c (h ph) (w pw)", ph=2, pw=2)
     print(jnp.mean(jnp.abs(unpatched)), jnp.mean(jnp.abs(output)))
