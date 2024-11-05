@@ -983,8 +983,53 @@ if __name__ == "__main__":
     img_ids = img_ids.at[..., 2].add(jnp.arange(w)[None, :])
     img_ids = img_ids.reshape(*batch_dims, -1, 3)
 
-    guidance_scale = jnp.full((*batch_dims,), 1, dtype=dtype)
+    guidance_scale = jnp.full((*batch_dims,), 3.5, dtype=dtype)
     y = pad_to_batch(clip_emb)
+
+    import sys
+
+    sys.path.append("flux_orig/src")
+    from flux.sampling import denoise, get_noise, get_schedule, prepare, unpack
+    from flux.util import (
+        configs,
+        embed_watermark,
+        load_ae,
+        load_clip,
+        load_flow_model,
+        load_t5,
+    )
+
+    torch.set_default_device("cpu")
+    cpu_model = load_flow_model("flux-dev", device="cpu")
+    height, width = h, w
+    def untorch(x):
+        if isinstance(x, torch.Tensor):
+            return x
+        return torch.from_numpy(np.asarray(x.astype(jnp.float32)))[0, :1].to(torch.bfloat16)
+    img_torch = untorch(img)
+    guidance_vec = torch.full(
+        (img_torch.shape[0],), 3.5, device=img_torch.device, dtype=img_torch.dtype
+    )
+    t_vec = torch.full(
+        (img.shape[0],), 0.1, dtype=img_torch.dtype, device=img_torch.device
+    )
+    txt_ids = torch.zeros((img_torch.shape[0], n_seq_txt, 3), device=img_torch.device, dtype=torch.int32)
+    with torch.inference_mode():
+        x = cpu_model(
+            img=untorch(img_torch),
+            img_ids=untorch(img_ids),
+            txt=untorch(txt),
+            txt_ids=txt_ids,
+            y=untorch(y),
+            timesteps=t_vec,
+            guidance=guidance_vec,
+        )
+    x = unpack(x.float(), h * 16, w * 16)
+    denoised = torch.from_numpy(noised) - 0.1 * x
+
+    generated = vae.deprocess(vae.decode(denoised))
+    generated.save("somewhere/denoised_torch.jpg")
+    
 
     weights, logic = eqx.partition(model, eqx.is_array)
 
@@ -1028,5 +1073,6 @@ if __name__ == "__main__":
                           ph=2, pw=2, h=h, w=w)[0, :1]
     denoised = noised - t * prediction
     print(jnp.mean(jnp.abs(prediction)), jnp.mean(jnp.abs(encoded)), jnp.mean(jnp.abs(denoised)))
+
     generated = vae.deprocess(vae.decode(denoised))
     generated.save("somewhere/denoised.jpg")
