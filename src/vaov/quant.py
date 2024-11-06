@@ -402,6 +402,32 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=True):
         return new_quant_matrix
 
 
+@qax.primitive_handler("slice")
+def slice_handler(
+    primitive, a: QuantMatrix, *, start_indices, limit_indices, **kwargs
+):
+    start_indices = start_indices[:-2] + (0, 0, 0)
+    limit_indices_quants = limit_indices[:-2] + a.quants.shape[-3:]
+    limit_indices_scales = limit_indices[:-2] + a.scales.shape[-3:]
+    return dataclasses.replace(
+        a,
+        quants=jax.lax.slice(a.quants, start_indices=start_indices, limit_indices=limit_indices_quants),
+        scales=jax.lax.slice(a.scales, start_indices=start_indices, limit_indices=limit_indices_scales),
+    )
+
+@qax.primitive_handler("squeeze")
+def squeeze_handler(
+    primitive, a: QuantMatrix, *, dimensions, **kwargs
+):
+    for axis in dimensions:
+        assert 0 <= axis < (a.quants.ndim - 3)
+    return dataclasses.replace(
+        a,
+        quants=jax.lax.squeeze(a.quants, dimensions),
+        scales=jax.lax.squeeze(a.scales, dimensions),
+    )
+
+
 @qax.primitive_handler("dot_general")
 def dot_general_handler(
     primitive, a: jax.Array, b: QuantMatrix, *, dimension_numbers, **kwargs

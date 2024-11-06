@@ -109,14 +109,18 @@ def attention(
         else:
             return jax.vmap(attention, in_axes=(0, 0, 0, 0))(q, k, v, pe)
 
-    q = q.transpose((0, 2, 1, 3))
-    k = k.transpose((0, 2, 1, 3))
-    v = v.transpose((0, 2, 1, 3))
     q, k = apply_rope(q, k, pe)
 
-    # x = jax.nn.dot_product_attention(q, k, v, mask=mask)
+    # q = jnp.transpose(q, (0, 2, 1, 3))
+    # k = jnp.transpose(k, (0, 2, 1, 3))
+    # v = jnp.transpose(v, (0, 2, 1, 3))
+    # x = jax.nn.dot_product_attention(q, k, v)
     # x = rearrange(x, "... h d -> ... (h d)")
+    # return x
+    q = q / math.sqrt(q.shape[-1])
+
     segment_ids = None
+    mask = None
     if mask is not None:
         q_segment_ids = mask.astype(jnp.int32)
         kv_segment_ids = mask.astype(jnp.int32)
@@ -366,7 +370,7 @@ class SelfAttention(eqx.Module):
         qkv = self.qkv_proj(x)
         q, k, v = rearrange(
             qkv,
-            "... (qkv heads dim) -> qkv ... heads dim",
+            "... seq (qkv heads dim) -> qkv ... heads seq dim",
             qkv=3,
             dim=self.head_dim,
         )
@@ -428,8 +432,7 @@ class DoubleStreamBlock(eqx.Module):
             MLP(config, key=k) for k in jax.random.split(key, 2)
         )
 
-    def __call__(self, data, vec, pe, mask=None):
-        data = sow_debug(data, "double_block", mode="append")
+    def __call__(self, data, vec, pe, mask=None, debug_first=False):
         img, txt = data["img"], data["txt"]
         txt_len = txt.shape[-2]
 
@@ -440,22 +443,42 @@ class DoubleStreamBlock(eqx.Module):
         img_modulated = img_mod1(img_normed)
         img_q, img_k, img_v = self.img_attn.qkv(img_modulated)
         
+        if debug_first:
+            sow_debug(
+                dict(img_q=img_q, img_k=img_k, img_v=img_v), "first_double_img_qkv"
+            )
+        
         txt_normed = self.txt_norm1(txt)
         txt_modulated = txt_mod1(txt_normed)
         txt_q, txt_k, txt_v = self.txt_attn.qkv(txt_modulated)
+
+        if debug_first:
+            sow_debug(
+                dict(txt_q=txt_q, txt_k=txt_k, txt_v=txt_v), "first_double_txt_qkv"
+            )
         
-        q = jnp.concatenate((txt_q, img_q), axis=-3)
-        k = jnp.concatenate((txt_k, img_k), axis=-3)
-        v = jnp.concatenate((txt_v, img_v), axis=-3)
+        q = jnp.concatenate((txt_q, img_q), axis=-2)
+        k = jnp.concatenate((txt_k, img_k), axis=-2)
+        v = jnp.concatenate((txt_v, img_v), axis=-2)
         
         attn = attention(q, k, v, pe, mask=mask)
+        if debug_first:
+            sow_debug(dict(attn=attn), "first_double_attn")
         txt_attn, img_attn = attn[..., :txt_len, :], attn[..., txt_len:, :]
 
         img = img + img_mod1.gate * self.img_attn.o_proj(img_attn)
+        if debug_first:
+            sow_debug(dict(img=img), "first_double_img_gated")
         img = img + img_mod2.gate * self.img_mlp(img_mod2(self.img_norm2(img)))
+        if debug_first:
+            sow_debug(dict(img=img), "first_double_img_mlp_gated")
     
         txt = txt + txt_mod1.gate * self.txt_attn.o_proj(txt_attn)
+        if debug_first:
+            sow_debug(dict(txt=txt), "first_double_txt_gated")
         txt = txt + txt_mod2.gate * self.txt_mlp(txt_mod2(self.txt_norm2(txt)))
+        if debug_first:
+            sow_debug(dict(txt=txt), "first_double_txt_mlp_gated")
         
         return dict(img=img, txt=txt)
 
@@ -526,6 +549,10 @@ class SequentialScan(eqx.Module, Generic[T]):
             return layer(carry, *args, **kwargs), None
 
         return jax.lax.scan(scan_fn, x, self.weights)[0]
+
+    def call_first(self, x, *args, **kwargs):
+        layer = eqx.combine(jax.tree.map(lambda x: x[0], self.weights), self.logic)
+        return layer(x, *args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self.weights, name)
@@ -649,7 +676,15 @@ class DiFormer(eqx.Module):
         mask = jnp.concatenate((txt_mask, img_mask), -1)
         data = dict(img=img, txt=txt)
         sow_debug(dict(img=img, txt=txt, vec=vec, pe=pe, mask=mask), "pre_double")
+
+        # is not actually called if we don't reap
+        first_double = self.double_blocks.call_first(
+            data, vec=vec, pe=pe, mask=mask, debug_first=True
+        )
+        sow_debug(first_double, "first_double")
+
         data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
+
 
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
@@ -992,7 +1027,7 @@ def main(use_torch=False):
     from PIL import Image
     dog_image_url = "https://www.akc.org/wp-content/uploads/2017/11/Shiba-Inu-standing-in-profile-outdoors.jpg"
     dog_image = Image.open(requests.get(dog_image_url, stream=True).raw)
-    dog_image = dog_image.resize((768, 512))
+    dog_image = dog_image.resize((256, 256))
     encoded = vae.encode(vae.preprocess(dog_image))
     if encoded.shape[-1] % 2:
         encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 0), (0, 1)))
