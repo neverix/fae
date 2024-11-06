@@ -377,9 +377,11 @@ class SelfAttention(eqx.Module):
         q, k = self.qk_norm(q, k, v)
         return q, k, v
 
-    def __call__(self, x, pe, mask=None):
+    def __call__(self, x, pe, mask=None, no_out=False):
         q, k, v = self.qkv(x)
         attn = attention(q, k, v, pe=pe, mask=mask)
+        if no_out:
+            return attn
         return self.o_proj(attn)
 
 class MLP(eqx.Module):
@@ -401,9 +403,11 @@ class MLP(eqx.Module):
             use_bias=True
         )
     
-    def __call__(self, x):
+    def __call__(self, x, no_out=False):
         mlp = self.in_proj(x)
         mlp = jax.nn.gelu(mlp, approximate=True)
+        if no_out:
+            return mlp
         return self.out_proj(mlp)
 
 
@@ -513,12 +517,14 @@ class SingleStreamBlock(eqx.Module):
         if debug_first:
             sow_debug(dict(x=x), "first_single_norm")
         
+        attn_pre = self.attn(x, pe, mask=mask, no_out=True)
         attn_out = self.attn(x, pe, mask=mask)
         if debug_first:
-            sow_debug(dict(attn_out=attn_out), "first_single_attn")
+            sow_debug(dict(attn_pre=attn_pre, attn_out=attn_out), "first_single_attn_pre")
+        mlp_pre = self.mlp(x, no_out=True)
         mlp_out = self.mlp(x)
         if debug_first:
-            sow_debug(dict(mlp_out=mlp_out), "first_single_mlp")
+            sow_debug(dict(mlp_pre=mlp_pre, mlp_out=mlp_out), "first_single_mlp_pre")
 
         out = x + mod.gate * (attn_out + mlp_out)
         if debug_first:
