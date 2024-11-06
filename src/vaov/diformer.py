@@ -1,5 +1,7 @@
 # https://github.com/black-forest-labs/flux/blob/main/src/flux/model.py
 import equinox as eqx
+import os
+import fire
 from equinox import nn
 import jax.experimental
 import jax.experimental.shard_map
@@ -107,6 +109,9 @@ def attention(
         else:
             return jax.vmap(attention, in_axes=(0, 0, 0, 0))(q, k, v, pe)
 
+    q = q.transpose((0, 2, 1, 3))
+    k = k.transpose((0, 2, 1, 3))
+    v = v.transpose((0, 2, 1, 3))
     q, k = apply_rope(q, k, pe)
 
     # x = jax.nn.dot_product_attention(q, k, v, mask=mask)
@@ -116,9 +121,6 @@ def attention(
         q_segment_ids = mask.astype(jnp.int32)
         kv_segment_ids = mask.astype(jnp.int32)
         segment_ids = flash_attention.SegmentIds(q=q_segment_ids, kv=kv_segment_ids)
-    q = q.transpose((0, 2, 1, 3))
-    k = k.transpose((0, 2, 1, 3))
-    v = v.transpose((0, 2, 1, 3))
     x = flash_attention.flash_attention(q, k, v, segment_ids=segment_ids)
     x = rearrange(x, "... h s d -> ... s (h d)")
 
@@ -172,7 +174,9 @@ class EmbedND(eqx.Module):
     theta: int
     axes_dim: list[int]
 
-    def __call__(self, ids: Float[Array, "*batch n_seq"]) -> Float[Array, "*batch n_seq n_heads embed_dim"]:
+    def __call__(
+        self, ids: Float[Array, "*batch n_seq n_axes"]
+    ) -> Float[Array, "*batch n_heads n_seq embed_dim 2 2"]:
         """
         Compute N-dimensional embeddings.
 
@@ -188,7 +192,7 @@ class EmbedND(eqx.Module):
             # "*batch n_seq {dim} 2 2"
             axis=-3,
         )
-        return emb[..., None, :, :, :]
+        return emb[..., None, :, :, :, :]
 
 
 class VLinear(eqx.Module):
@@ -425,6 +429,7 @@ class DoubleStreamBlock(eqx.Module):
         )
 
     def __call__(self, data, vec, pe, mask=None):
+        data = sow_debug(data, "double_block", mode="append")
         img, txt = data["img"], data["txt"]
         txt_len = txt.shape[-2]
 
@@ -537,12 +542,13 @@ def pad_and_mask(x, pad_to=128):
     return x, mask
 
 
-def sow_debug(val, name):
+def sow_debug(val, name, **kwargs):
     if isinstance(val, dict):
+        results = {}
         for key, value in val.items():
-            sow_debug(value, f"{name}.{key}")
-        return
-    sow(val, tag="debug", name=name)
+            results[key] = sow_debug(value, f"{name}.{key}", **kwargs)
+        return results
+    return sow(val, tag="debug", name=name, **kwargs)
 
 
 class DiFormer(eqx.Module):
@@ -942,7 +948,35 @@ dumb_prng_impl = prng.PRNGImpl(
     fold_in=dumb_fold_in,
 )
 
-if __name__ == "__main__":
+def main(use_torch=False):
+    global mesh
+
+    if use_torch:
+        print("Using torch")
+        jax.default_device(jax.devices("cpu")[0])
+
+        # import sys
+
+        # sys.path.append("flux_orig/src")
+        # from flux.modules.layers import EmbedND as END
+        # import torch
+        # torch.set_grad_enabled(False)
+        # config = DiFormerConfig()
+        # pe_dim = config.hidden_size // config.num_heads
+        # embed_nd = EmbedND(
+        #     dim=pe_dim, theta=config.theta, axes_dim=config.axes_dim
+            
+        # )
+        # end = END(
+        #     dim=pe_dim, theta=config.theta, axes_dim=config.axes_dim
+        # )
+        # fake_data = jax.random.randint(jax.random.key(0), (1, 128, 3), 0, 100)
+        # a = np.asarray(embed_nd(fake_data))
+        # b = end(torch.from_numpy(np.asarray(fake_data))).numpy()
+        # print(np.mean(np.abs(a)), np.mean(np.abs(b)), np.mean(np.abs(a - b)))
+        # return
+    
+    
     logger.info("Creating inputs")
     
     batch_dims = (4, 4)
@@ -1001,7 +1035,7 @@ if __name__ == "__main__":
     guidance_scale = jnp.full((*batch_dims,), 3.5, dtype=dtype)
     y = pad_to_batch(clip_emb)
 
-    if True:
+    if use_torch:
         import sys
 
         sys.path.append("flux_orig/src")
@@ -1015,7 +1049,13 @@ if __name__ == "__main__":
             load_t5,
         )
 
-        old_reaped = {k: torch.from_numpy(v) for k, v in np.load("somewhere/reaped.npz").items()}
+        old_reaped = {}
+        for k, v in np.load("somewhere/reaped.npz").items():
+            try:
+                old_reaped[k] = torch.from_numpy(v)
+            except TypeError:
+                print("loading warning: skipping", k)
+        print({k: v.shape for k, v in old_reaped.items()})
         torch.set_default_device("cpu")
         cpu_model = load_flow_model("flux-dev", device="cpu")
         height, width = h, w
@@ -1032,6 +1072,8 @@ if __name__ == "__main__":
         )
         txt_ids = torch.zeros((img_torch.shape[0], n_seq_txt, 3), device=img_torch.device, dtype=torch.int32)
         with torch.inference_mode():
+            from collections import Counter
+            n_occurred = Counter()
             for name, x in cpu_model(
                 img=untorch(img_torch),
                 img_ids=untorch(img_ids),
@@ -1050,8 +1092,15 @@ if __name__ == "__main__":
                         continue
                     if old_value.shape[:2] == (4, 4):
                         old_value = old_value[0, :1]
+                    if old_value.shape[1:3] == (4, 4):
+                        old_value = old_value[:, 0, 0:1]
+                    if old_value.shape[1:] == value.shape:
+                        layer_index = n_occurred.get(key, 0)
+                        print(key, "layer index", layer_index)
+                        old_value = old_value[layer_index]
                     print(key, value.shape, old_value.shape)
                     print(key, value.abs().mean(), old_value.abs().mean(), (old_value - value).abs().mean())
+                    n_occurred[key] += 1
         x = x["img"]
         x = unpack(x.float(), h * 16, w * 16)
         denoised = torch.from_numpy(noised) - 0.1 * x
@@ -1099,8 +1148,9 @@ if __name__ == "__main__":
 
     logger.info("Running model")
     output, reaped = f(weights, *args)
+    print({k: v.shape for k, v in reaped.items()})
     np.savez(
-        "somewhere/reaped.npz", **{k: np.asarray(v[0, :1]) for k, v in reaped.items()}
+        "somewhere/reaped.npz", **{k: np.asarray(v[0, :1].astype(np.float32)) for k, v in reaped.items()}
     )
     prediction = rearrange(output, "b d (h w) (c ph pw) -> (b d) c (h ph) (w pw)",
                           ph=2, pw=2, h=h, w=w)[0, :1]
@@ -1109,3 +1159,7 @@ if __name__ == "__main__":
 
     generated = vae.deprocess(vae.decode(denoised))
     generated.save("somewhere/denoised.jpg")
+
+
+if __name__ == "__main__":
+    fire.Fire(main)
