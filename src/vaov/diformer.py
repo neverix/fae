@@ -29,6 +29,8 @@ import math
 import numpy as np
 from loguru import logger
 from typing import TypeVar, Generic
+from oryx.core import sow
+from oryx.core.interpreters.harvest import call_and_reap
 
 @dataclass(frozen=True)
 class DiFormerConfig:
@@ -535,6 +537,14 @@ def pad_and_mask(x, pad_to=128):
     return x, mask
 
 
+def sow_debug(val, name):
+    if isinstance(val, dict):
+        for key, value in val.items():
+            sow_debug(value, f"{name}.{key}")
+        return
+    sow(val, tag="debug", name=name)
+
+
 class DiFormer(eqx.Module):
     """Diffusion transformer."""
     config_cls = DiFormerConfig
@@ -609,6 +619,7 @@ class DiFormer(eqx.Module):
         Returns:
             Processed image tensor.
         """
+        sow_debug(dict(img=img), "pre_img_in")
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, self.config.time_embed_dim))
         if self.config.guidance_embed:
@@ -631,13 +642,16 @@ class DiFormer(eqx.Module):
         
         mask = jnp.concatenate((txt_mask, img_mask), -1)
         data = dict(img=img, txt=txt)
+        sow_debug(dict(img=img, txt=txt, vec=vec, pe=pe, mask=mask), "pre_double")
         data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
 
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
+        sow_debug(dict(data=data), "pre_single")
         data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
         img = img[..., :orig_img_len, :]
 
+        sow_debug(dict(data=data), "pre_final")
         img = self.final_layer(img, vec)
         
         return img
@@ -944,6 +958,7 @@ if __name__ == "__main__":
     from PIL import Image
     dog_image_url = "https://www.akc.org/wp-content/uploads/2017/11/Shiba-Inu-standing-in-profile-outdoors.jpg"
     dog_image = Image.open(requests.get(dog_image_url, stream=True).raw)
+    dog_image = dog_image.resize((768, 512))
     encoded = vae.encode(vae.preprocess(dog_image))
     if encoded.shape[-1] % 2:
         encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 0), (0, 1)))
@@ -986,49 +1001,62 @@ if __name__ == "__main__":
     guidance_scale = jnp.full((*batch_dims,), 3.5, dtype=dtype)
     y = pad_to_batch(clip_emb)
 
-    import sys
+    if True:
+        import sys
 
-    sys.path.append("flux_orig/src")
-    from flux.sampling import denoise, get_noise, get_schedule, prepare, unpack
-    from flux.util import (
-        configs,
-        embed_watermark,
-        load_ae,
-        load_clip,
-        load_flow_model,
-        load_t5,
-    )
-
-    torch.set_default_device("cpu")
-    cpu_model = load_flow_model("flux-dev", device="cpu")
-    height, width = h, w
-    def untorch(x):
-        if isinstance(x, torch.Tensor):
-            return x
-        return torch.from_numpy(np.asarray(x.astype(jnp.float32)))[0, :1].to(torch.bfloat16)
-    img_torch = untorch(img)
-    guidance_vec = torch.full(
-        (img_torch.shape[0],), 3.5, device=img_torch.device, dtype=img_torch.dtype
-    )
-    t_vec = torch.full(
-        (img.shape[0],), 0.1, dtype=img_torch.dtype, device=img_torch.device
-    )
-    txt_ids = torch.zeros((img_torch.shape[0], n_seq_txt, 3), device=img_torch.device, dtype=torch.int32)
-    with torch.inference_mode():
-        x = cpu_model(
-            img=untorch(img_torch),
-            img_ids=untorch(img_ids),
-            txt=untorch(txt),
-            txt_ids=txt_ids,
-            y=untorch(y),
-            timesteps=t_vec,
-            guidance=guidance_vec,
+        sys.path.append("flux_orig/src")
+        from flux.sampling import denoise, get_noise, get_schedule, prepare, unpack
+        from flux.util import (
+            configs,
+            embed_watermark,
+            load_ae,
+            load_clip,
+            load_flow_model,
+            load_t5,
         )
-    x = unpack(x.float(), h * 16, w * 16)
-    denoised = torch.from_numpy(noised) - 0.1 * x
 
-    generated = vae.deprocess(vae.decode(denoised))
-    generated.save("somewhere/denoised_torch.jpg")
+        old_reaped = {k: torch.from_numpy(v) for k, v in np.load("somewhere/reaped.npz").items()}
+        torch.set_default_device("cpu")
+        cpu_model = load_flow_model("flux-dev", device="cpu")
+        height, width = h, w
+        def untorch(x):
+            if isinstance(x, torch.Tensor):
+                return x
+            return torch.from_numpy(np.asarray(x.astype(jnp.float32)))[0, :1].to(torch.bfloat16)
+        img_torch = untorch(img)
+        guidance_vec = torch.full(
+            (img_torch.shape[0],), 3.5, device=img_torch.device, dtype=img_torch.dtype
+        )
+        t_vec = torch.full(
+            (img.shape[0],), 0.1, dtype=img_torch.dtype, device=img_torch.device
+        )
+        txt_ids = torch.zeros((img_torch.shape[0], n_seq_txt, 3), device=img_torch.device, dtype=torch.int32)
+        with torch.inference_mode():
+            for name, x in cpu_model(
+                img=untorch(img_torch),
+                img_ids=untorch(img_ids),
+                txt=untorch(txt),
+                txt_ids=txt_ids,
+                y=untorch(y),
+                timesteps=t_vec,
+                guidance=guidance_vec,
+            ):
+                for key, value in x.items():
+                    key = f"{name}.{key}"
+                    try:
+                        old_value = old_reaped[key]
+                    except KeyError:
+                        print("warning: missing", key)
+                        continue
+                    if old_value.shape[:2] == (4, 4):
+                        old_value = old_value[0, :1]
+                    print(key, value.shape, old_value.shape)
+                    print(key, value.abs().mean(), old_value.abs().mean(), (old_value - value).abs().mean())
+        x = x["img"]
+        x = unpack(x.float(), h * 16, w * 16)
+        denoised = torch.from_numpy(noised) - 0.1 * x
+        generated = vae.deprocess(vae.decode(denoised))
+        generated.save("somewhere/denoised_torch.jpg")
     
 
     weights, logic = eqx.partition(model, eqx.is_array)
@@ -1037,7 +1065,9 @@ if __name__ == "__main__":
     @qax.use_implicit_args
     def f(weights, img, txt, timesteps, y, img_ids, guidance_scale):
         model = eqx.combine(weights, logic)
-        return model(img=img, txt=txt, timesteps=timesteps, y=y, img_ids=img_ids, guidance=guidance_scale)
+        model = call_and_reap(model, tag="debug")
+        model_outputs, reaped = model(img=img, txt=txt, timesteps=timesteps, y=y, img_ids=img_ids, guidance=guidance_scale)
+        return model_outputs, reaped
 
     logger.info("Loading model into mesh")
     shape_request = (-1, 2, 1)
@@ -1068,7 +1098,10 @@ if __name__ == "__main__":
         for arg in args]
 
     logger.info("Running model")
-    output = f(weights, *args)
+    output, reaped = f(weights, *args)
+    np.savez(
+        "somewhere/reaped.npz", **{k: np.asarray(v[0, :1]) for k, v in reaped.items()}
+    )
     prediction = rearrange(output, "b d (h w) (c ph pw) -> (b d) c (h ph) (w pw)",
                           ph=2, pw=2, h=h, w=w)[0, :1]
     denoised = noised - t * prediction

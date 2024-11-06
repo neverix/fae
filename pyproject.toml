@@ -18,6 +18,7 @@ dependencies = [
     "matplotlib>=3.9.2",
     "onnx>=1.17.0",
     "orbax>=0.1.9",
+    "oryx>=0.2.7",
     "qax>=0.3.1",
     "sentencepiece>=0.2.0",
     "torch>=2.4.1",
