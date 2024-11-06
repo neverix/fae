@@ -506,15 +506,24 @@ class SingleStreamBlock(eqx.Module):
         
         self.modulation = Modulation(config.hidden_size, double=False, key=key)
     
-    def __call__(self, data, vec, pe, mask=None):
+    def __call__(self, data, vec, pe, mask=None, debug_first=False):
         mod, _ = self.modulation(vec)
         x = self.pre_norm(data)
         x = mod(x)
+        if debug_first:
+            sow_debug(dict(x=x), "first_single_norm")
         
         attn_out = self.attn(x, pe, mask=mask)
+        if debug_first:
+            sow_debug(dict(attn_out=attn_out), "first_single_attn")
         mlp_out = self.mlp(x)
+        if debug_first:
+            sow_debug(dict(mlp_out=mlp_out), "first_single_mlp")
 
-        return x + mod.gate * (attn_out + mlp_out)
+        out = x + mod.gate * (attn_out + mlp_out)
+        if debug_first:
+            sow_debug(dict(out=out), "first_single_out")
+        return out
 
 
 def is_arr(x):
@@ -678,17 +687,21 @@ class DiFormer(eqx.Module):
         sow_debug(dict(img=img, txt=txt, vec=vec, pe=pe, mask=mask), "pre_double")
 
         # is not actually called if we don't reap
-        first_double = self.double_blocks.call_first(
-            data, vec=vec, pe=pe, mask=mask, debug_first=True
-        )
-        sow_debug(first_double, "first_double")
+        # first_double = self.double_blocks.call_first(
+        #     data, vec=vec, pe=pe, mask=mask, debug_first=True
+        # )
+        # sow_debug(first_double, "first_double")
 
-        data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
+        # data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
 
 
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
         sow_debug(dict(data=data), "pre_single")
+        first_single = self.single_blocks.call_first(
+            data, vec=vec, pe=pe, mask=mask, debug_first=True
+        )
+        sow_debug(first_single, "first_single")
         data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
         img = img[..., :orig_img_len, :]
 
