@@ -693,22 +693,22 @@ class DiFormer(eqx.Module):
         sow_debug(dict(img=img, txt=txt, vec=vec, pe=pe, mask=mask), "pre_double")
 
         # is not actually called if we don't reap
-        # first_double = self.double_blocks.call_first(
-        #     data, vec=vec, pe=pe, mask=mask, debug_first=True
-        # )
-        # sow_debug(first_double, "first_double")
+        first_double = self.double_blocks.call_first(
+            data, vec=vec, pe=pe, mask=mask, debug_first=True
+        )
+        sow_debug(first_double, "first_double")
 
-        # data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
+        data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
 
 
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
-        # sow_debug(dict(data=data), "pre_single")
-        # first_single = self.single_blocks.call_first(
-        #     data, vec=vec, pe=pe, mask=mask, debug_first=True
-        # )
-        # sow_debug(first_single, "first_single")
-        # data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
+        sow_debug(dict(data=data), "pre_single")
+        first_single = self.single_blocks.call_first(
+            data, vec=vec, pe=pe, mask=mask, debug_first=True
+        )
+        sow_debug(first_single, "first_single")
+        data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
         img = data[..., txt.shape[-2]:, :]
 
         sow_debug(dict(data=img), "pre_final")
