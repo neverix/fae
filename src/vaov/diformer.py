@@ -703,16 +703,17 @@ class DiFormer(eqx.Module):
 
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
-        sow_debug(dict(data=data), "pre_single")
-        first_single = self.single_blocks.call_first(
-            data, vec=vec, pe=pe, mask=mask, debug_first=True
-        )
-        sow_debug(first_single, "first_single")
-        data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
-        img = img[..., :orig_img_len, :]
+        # sow_debug(dict(data=data), "pre_single")
+        # first_single = self.single_blocks.call_first(
+        #     data, vec=vec, pe=pe, mask=mask, debug_first=True
+        # )
+        # sow_debug(first_single, "first_single")
+        # data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
+        img = data[..., txt.shape[-2]:, :]
 
-        sow_debug(dict(data=data), "pre_final")
-        img = self.final_layer(img, vec)
+        sow_debug(dict(data=img), "pre_final")
+        img = self.final_layer(img, vec)[..., :orig_img_len, :]
+        sow_debug(dict(img=img), "final_img")
         
         return img
 
