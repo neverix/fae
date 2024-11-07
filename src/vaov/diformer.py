@@ -1,6 +1,8 @@
 # https://github.com/black-forest-labs/flux/blob/main/src/flux/model.py
 import equinox as eqx
 import os
+import torch
+import random
 import fire
 from equinox import nn
 import jax.experimental
@@ -31,7 +33,7 @@ import math
 import numpy as np
 from loguru import logger
 from typing import TypeVar, Generic
-
+import threading
 
 @dataclass(frozen=True)
 class DiFormerConfig:
@@ -78,6 +80,9 @@ def rope(pos: Float[Array, "*batch n_seq"], dim: int, theta: int) -> Float[Array
     return out.astype(jnp.float32)
 
 
+global_mesh = threading.local()
+
+
 def attention(
     q: Float[Array, "*batch n_seq n_heads d_head"],
     k: Float[Array, "*batch n_seq n_heads d_head"],
@@ -96,11 +101,10 @@ def attention(
                 pe = pe.reshape(-1, *pe.shape[len(og_batch_dims):])
                 mask = mask.reshape(-1, *mask.shape[len(og_batch_dims):])
                 x = attention(q, k, v, pe, mask)
-                # print(q.shape, k.shape, v.shape, pe.shape, mask.shape, x.shape)
                 return x.reshape(*og_batch_dims, *x.shape[-2:])
             args = (q, k, v, pe, mask)
             return jax.experimental.shard_map.shard_map(
-                per_block, mesh,
+                per_block, global_mesh.mesh,
                 in_specs=tuple(P("dp", "fsdp", *((None,) * (x.ndim - 3))) for x in args),
                 out_specs=P("dp", "fsdp", None, None),
                 check_rep=False
@@ -337,7 +341,8 @@ class Modulation(eqx.Module):
         self.lin = VLinear(dim, self.multiplier * dim, use_bias=True, key=key)
 
     def __call__(self, vec: Float[Array, "*batch dim"]) -> tuple[ModulationOut, ModulationOut | None]:
-        out = jnp.split(self.lin(jax.nn.silu(vec))[..., None, :], self.multiplier, axis=-1)
+        lin_of_silu = self.lin(jax.nn.silu(vec))
+        out = jnp.split(lin_of_silu[..., None, :], self.multiplier, axis=-1)
 
         return (
             ModulationOut(*out[:3]),
@@ -882,110 +887,192 @@ dumb_prng_impl = prng.PRNGImpl(
     fold_in=dumb_fold_in,
 )
 
+
+def random_or(key):
+    if key is None:
+        key = jax.random.PRNGKey(random.randint(0, 2 ** 32 - 1))
+    return key
+
+
+def from_torch(x):
+    if isinstance(x, torch.Tensor):
+        if x.dtype == torch.bfloat16:
+            x = x.to(torch.float32)
+        y = x.detach().cpu().numpy()
+        if x.dtype == torch.bfloat16:
+            y = y.astype(ml_dtypes.bfloat16)
+        x = y
+    if isinstance(x, np.ndarray):
+        x = jnp.array(x)
+    return x
+
+class DiFormerInferencer:
+    def __init__(self,
+                 mesh,
+                 vae_args=("somewhere/taef1/taef1_encoder.onnx", "somewhere/taef1/taef1_decoder.onnx"),
+                 diformer_kwargs=None):
+        if diformer_kwargs is None:
+            diformer_kwargs = {}
+        self.mesh = mesh
+        
+        logger.info("Creating VAE")
+        self.vae = FluxVAE(
+            *vae_args
+        )
+
+        with jax.default_device(jax.devices("cpu")[0]):
+            logger.info("Creating model")
+            model = DiFormer.from_pretrained(**diformer_kwargs)
+
+            logger.info("Loading model into mesh")
+
+        global_mesh.mesh = mesh
+        mesh_and_axis = (mesh, None)  # FSDP
+        
+        logger.info("Moving model to device")
+        weights, logic = eqx.partition(model, eqx.is_array)
+        def to_mesh(arr):
+            if not is_arr(arr):
+                return arr
+            if isinstance(arr, QuantMatrix):
+                return arr.with_mesh_and_axis(mesh_and_axis)
+            return jax.device_put(arr,
+                                jax.sharding.NamedSharding(
+                                    mesh,
+                                    jax.sharding.PartitionSpec(*((None,) * (arr.ndim)))))
+        weights = jax.tree.map(to_mesh, weights, is_leaf=is_arr)
+        self.weights, self.logic = weights, logic
+
+    def __call__(self, text_inputs, image_inputs):
+        img, timesteps, img_ids, guidance_scale, h, w = [image_inputs[k] for k in (
+            "patched", "timesteps", "img_ids", "guidance_scale", "h", "w"
+        )]
+        txt, vec_in = [text_inputs[k] for k in (
+            "txt", "vec_in"
+        )]
+        patched = self.run_model(
+            self.logic,
+            weights=self.weights,
+            img=img,
+            txt=txt,
+            timesteps=timesteps,
+            vec_in=vec_in,
+            img_ids=img_ids,
+            guidance_scale=guidance_scale
+        )
+        prediction = rearrange(patched, "b d (h w) (c ph pw) -> b d c (h ph) (w pw)",
+                          ph=2, pw=2, h=h, w=w)
+        denoised = image_inputs["noised"] - timesteps[..., None, None, None] * prediction
+        return dict(
+            patched=patched,
+            prediction=prediction,
+            denoised=denoised,
+        )
+        
+
+    @staticmethod
+    @partial(jax.jit, static_argnums=(0,))
+    @qax.use_implicit_args
+    def run_model(logic, *, weights, img, txt, timesteps, vec_in, img_ids, guidance_scale):
+        model = eqx.combine(weights, logic)
+        model_outputs = model(
+            img=img,
+            txt=txt,
+            timesteps=timesteps,
+            y=vec_in,
+            img_ids=img_ids,
+            guidance=guidance_scale,
+        )
+        return model_outputs
+
+    def to_mesh(self, x):
+        def to_mesh_fn(x):
+            if not isinstance(x, jnp.ndarray):
+                return x
+            x = x.reshape(self.mesh.shape["dp"], -1, *x.shape[1:])
+            return jax.device_put(x, jax.sharding.NamedSharding(
+                self.mesh, jax.sharding.PartitionSpec("dp", "fsdp", *((None,) * (x.ndim - 2)))))
+        return jax.tree.map(to_mesh_fn, x)
+
+    def text_input(self, t5_emb, clip_emb):
+        return self.to_mesh(dict(
+            txt=from_torch(t5_emb),
+            vec_in=from_torch(clip_emb),
+        ))
+
+    def image_input(self, images, timesteps=0, guidance_scale=3.5, key=None):
+        encoded = self.vae.encode(jnp.concatenate([self.vae.preprocess(image) for image in images], 0))
+        if encoded.shape[-1] % 2:
+            encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 0), (0, 1)))
+        if encoded.shape[-2] % 2:
+            encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 1), (0, 0)))
+        
+        batch = encoded.shape[0]
+        if isinstance(timesteps, (int, float)):
+            timesteps = jnp.full((batch,), timesteps, dtype=jnp.float32)
+        key = random_or(key)
+        noise = jax.random.normal(key, encoded.shape, dtype=encoded.dtype)
+
+        if isinstance(guidance_scale, (int, float)):
+            guidance_scale = jnp.full((batch,), guidance_scale, dtype=jnp.float32)
+
+        t = timesteps[..., None, None, None]
+        noised = encoded * (1 - t) + noise * t
+        
+        patched = rearrange(noised, "b c (h ph) (w pw) -> b h w (c ph pw)", ph=2, pw=2)
+        h, w = patched.shape[-3:-1]
+        patched = rearrange(patched, "b h w c -> b (h w) c")
+        n_seq = patched.shape[-2]
+        
+        img_ids = jnp.zeros((batch, h, w, 3), dtype=jnp.uint32)
+        img_ids = img_ids.at[..., 1].add(jnp.arange(h)[:, None])
+        img_ids = img_ids.at[..., 2].add(jnp.arange(w)[None, :])
+        img_ids = img_ids.reshape(batch, -1, 3)
+    
+        return self.to_mesh(dict(
+            encoded=encoded,
+            noise=noise,
+            noised=noised,
+            timesteps=timesteps,
+            guidance_scale=guidance_scale,
+            patched=patched,
+            img_ids=img_ids,
+            h=h,
+            w=w,
+            n_seq=n_seq,   
+        ))
+
+
 def main():
-    global mesh
-    
     logger.info("Creating inputs")
-    
-    batch_dims = (4, 4)
-
-    key = jax.random.PRNGKey(0)
-    dtype = jnp.bfloat16
-
-    vae = FluxVAE(
-        "somewhere/taef1/taef1_encoder.onnx", "somewhere/taef1/taef1_decoder.onnx"
-    )
 
     import requests
     from PIL import Image
     dog_image_url = "https://www.akc.org/wp-content/uploads/2017/11/Shiba-Inu-standing-in-profile-outdoors.jpg"
     dog_image = Image.open(requests.get(dog_image_url, stream=True).raw)
-    encoded = vae.encode(vae.preprocess(dog_image))
-    if encoded.shape[-1] % 2:
-        encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 0), (0, 1)))
-    if encoded.shape[-2] % 2:
-        encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 1), (0, 0)))
 
-    import torch
+    torch.set_grad_enabled(False)
     text_encodings = torch.load("somewhere/res.pt", map_location=torch.device("cpu"), weights_only=True)
-    t5_emb, clip_emb = (x.detach().cpu().float().numpy().astype(ml_dtypes.bfloat16) for x in text_encodings[:2])
-    n_seq_txt = t5_emb.shape[1]
+    t5_emb, clip_emb = text_encodings[:2]
 
-    with jax.default_device(jax.devices("cpu")[0]):
-        logger.info("Creating model")
-        model = DiFormer.from_pretrained()
-
-    def pad_to_batch(x):
-        return jnp.repeat(x, np.prod(batch_dims), axis=0).reshape(
-            *batch_dims, *x.shape[1:]
-        )
-
-    timesteps = jnp.full((1,), 0.1, dtype=jnp.float32)
-    noise = jax.random.normal(key, encoded.shape, dtype=dtype)
-    t = timesteps[..., None, None, None]
-    noised = encoded * (1 - t) + noise * t
-    timesteps = pad_to_batch(timesteps)
-    txt = pad_to_batch(jnp.asarray(t5_emb, dtype))
-
-    patched = rearrange(noised, "b c (h ph) (w pw) -> b h w (c ph pw)", ph=2, pw=2)
-    h, w = patched.shape[-3:-1]
-    patched = rearrange(patched, "b h w c -> b (h w) c")
-    n_seq = patched.shape[-2]
-    patched = pad_to_batch(patched)
-    img = jnp.astype(patched, dtype)
-
-    img_ids = jnp.zeros((*batch_dims, h, w, 3), dtype=jnp.uint32)
-    img_ids = img_ids.at[..., 1].add(jnp.arange(h)[:, None])
-    img_ids = img_ids.at[..., 2].add(jnp.arange(w)[None, :])
-    img_ids = img_ids.reshape(*batch_dims, -1, 3)
-
-    guidance_scale = jnp.full((*batch_dims,), 3.5, dtype=dtype)
-    y = pad_to_batch(clip_emb)
-
-    weights, logic = eqx.partition(model, eqx.is_array)
-
-    @jax.jit
-    @qax.use_implicit_args
-    def f(weights, img, txt, timesteps, y, img_ids, guidance_scale):
-        model = eqx.combine(weights, logic)
-        model_outputs = model(img=img, txt=txt, timesteps=timesteps, y=y, img_ids=img_ids, guidance=guidance_scale)
-        return model_outputs
-
-    logger.info("Loading model into mesh")
     shape_request = (-1, 2, 1)
     device_count = jax.device_count("tpu")
     mesh_shape = np.arange(device_count).reshape(*shape_request).shape
     physical_mesh = mesh_utils.create_device_mesh(mesh_shape)
     mesh = jax.sharding.Mesh(physical_mesh, ("dp", "fsdp", "tp"))
-    mesh_and_axis = (mesh, None)  # FSDP
-    def to_mesh(arr):
-        if not is_arr(arr):
-            return arr
-        if isinstance(arr, QuantMatrix):
-            return arr.with_mesh_and_axis(mesh_and_axis)
-        return jax.device_put(arr,
-                              jax.sharding.NamedSharding(
-                                  mesh,
-                                  jax.sharding.PartitionSpec(*((None,) * (arr.ndim)))))
-    weights = jax.tree.map(to_mesh, weights, is_leaf=is_arr)
 
-    logger.info("Loading inputs into mesh")
-    args = img, txt, timesteps, y, img_ids, guidance_scale
-    args = [
-        jax.device_put(
-            arg,
-            jax.sharding.NamedSharding(mesh,
-                                       jax.sharding.PartitionSpec(
-                                           "dp", "fsdp", *((None,) * (arg.ndim - 2)))))
-        for arg in args]
-
+    logger.info("Creating inferencer")
+    inferencer = DiFormerInferencer(mesh)
+    logger.info("Creating inputs")
+    batch_size = 4
+    image_inputs = inferencer.image_input([dog_image] * batch_size, timesteps=0.3)
+    text_inputs = inferencer.text_input(t5_emb.repeat(batch_size, 1, 1), clip_emb.repeat(batch_size, 1))
     logger.info("Running model")
-    output = f(weights, *args)
-    prediction = rearrange(output, "b d (h w) (c ph pw) -> (b d) c (h ph) (w pw)",
-                          ph=2, pw=2, h=h, w=w)[0, :1]
-    denoised = noised - t * prediction
-    print(jnp.mean(jnp.abs(prediction)), jnp.mean(jnp.abs(encoded)), jnp.mean(jnp.abs(denoised)))
-
+    result = inferencer(text_inputs, image_inputs)
+    
+    logger.info("Saving results")
+    vae = inferencer.vae
+    denoised = result["denoised"][0, :1]
     generated = vae.deprocess(vae.decode(denoised))
     generated.save("somewhere/denoised.jpg")
 

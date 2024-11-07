@@ -45,56 +45,71 @@ def to_device_params_tree(params, **kwargs):
         is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue),
     )
 
+class T5EncoderInferencer(object):
+    def __init__(self, mesh, model_name="nev/t5-v1_1-xxl-flax"):
+        self.mesh = mesh
+        self.input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", None))
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        quantized_path = Path("somewhere/quantized_t5")
+        logger.info("Loading model")
+        model, params = FlaxT5EncoderModel.from_pretrained(
+            model_name, _do_init=False, dtype=jnp.bfloat16
+        )
+        if not quantized_path.exists():
+            logger.info("Quantizing model")
+            params = quantize_params_tree(params)
+            logger.info("Saving quantized model")
+            save_thing(params, quantized_path)
+        else:
+            params = load_thing(quantized_path)
+        logger.info("Moving model to device")
+        params = to_device_params_tree(params, mesh_and_axis=(mesh, None))
+        
+        def set_use_kernel(tree, value):
+            def op(x):
+                if isinstance(x, QuantMatrix):
+                    x.use_kernel = value
+
+            jax.tree.map(op, tree, is_leaf=lambda x: isinstance(x, QuantMatrix))
+
+        set_use_kernel(params, True)
+
+        self.wrapped_model = eqx.filter_jit(qax.use_implicit_args(model.__call__))
+        self.params = params
+
+    def __call__(self, texts):
+        encoder_input = self.create_inputs(texts)
+        return jax.jit(
+            lambda params, ids: self.wrapped_model(params=params, input_ids=ids).last_hidden_state) \
+            (self.params, encoder_input)
+
+    def create_inputs(self, texts):
+        encoder_inputs = []
+        with jax.default_device(jax.devices("cpu")[0]):
+            for text in texts:
+                encoder_input = jnp.asarray(self.tokenizer.encode(text), dtype=jnp.int32)[
+                    None
+                ]
+                encoder_input = jnp.pad(
+                    encoder_input,
+                    ((0, 0), (0, 512 - encoder_input.shape[-1])),
+                    mode="constant",
+                    constant_values=self.tokenizer.pad_token_id,
+                )
+                encoder_inputs.append(encoder_input)
+        return self.shard_inputs(jnp.concatenate(encoder_inputs, axis=0))
+
+    def shard_inputs(self, inputs):
+        return jax.device_put(
+            inputs.reshape(min(self.mesh.shape["dp"], inputs.shape[0]), -1, inputs.shape[-1]), self.input_sharding
+        )
+
+
 if __name__ == "__main__":
     import jax_smi
     jax_smi.initialise_tracking(7)
     mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(-1, 4, 1), ("dp", "fsdp", "tp"))
-    input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", None))
+    inferencer = T5EncoderInferencer(mesh)
+    print(inferencer(["Hello, world!"] * 8).shape)
 
-    def shard_inputs(inputs):
-        return jax.device_put(
-            inputs.reshape(mesh.shape["dp"], -1, inputs.shape[-1]), input_sharding
-        )
-
-    logger.info("Creating inputs")
-    model_name = "nev/t5-v1_1-xxl-flax"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    input = "A mystic cat with a sign that says hello world!"
-    encoder_input = jnp.asarray(tokenizer.encode(input), dtype=jnp.int32)[None]
-    encoder_input = jnp.pad(
-        encoder_input,
-        ((0, 0), (0, 512 - encoder_input.shape[-1])),
-        mode="constant",
-        constant_values=tokenizer.pad_token_id,
-    )
-    encoder_input = jnp.repeat(encoder_input, 16, axis=0)
-    encoder_input = shard_inputs(encoder_input)
-
-    quantized_path = Path("somewhere/quantized_t5")
-    logger.info("Loading model")
-    model, params = FlaxT5EncoderModel.from_pretrained(model_name, _do_init=False, dtype=jnp.bfloat16)
-    if not quantized_path.exists():
-        logger.info("Quantizing model")
-        params = quantize_params_tree(params)
-        logger.info("Saving quantized model")
-        save_thing(params, quantized_path)
-    else:
-        params = load_thing(quantized_path)
-    logger.info("Moving model to device")
-    params = to_device_params_tree(params, mesh_and_axis=(mesh, None))
-
-    wrapped_model = eqx.filter_jit(qax.use_implicit_args(model.__call__))
-
-
-    def set_use_kernel(tree, value):
-        def op(x):
-            if isinstance(x, QuantMatrix):
-                x.use_kernel = value
-
-        jax.tree.map(op, tree, is_leaf=lambda x: isinstance(x, QuantMatrix))
-
-    set_use_kernel(params, True)
-    logger.info("Running model")
-    quantized_states = jax.jit(lambda params, ids: wrapped_model(params=params, input_ids=ids).last_hidden_state)(params, encoder_input)
-    logger.info("Saving outputs")
-    np.save("somewhere/quantized_states.npy", np.asarray(quantized_states.astype(np.float32)))
