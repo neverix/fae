@@ -65,10 +65,14 @@ if __name__ == "__main__":
 
     logger.info("Loading model")
     model, params = FlaxT5EncoderModel.from_pretrained(model_name, _do_init=False, dtype=jnp.bfloat16)
-    logger.info("Quantizing model")
-    params = quantize_params_tree(params)
+    # logger.info("Quantizing model")
+    # params = quantize_params_tree(params)
     logger.info("Moving model to device")
-    params = to_device_params_tree(params, mesh_and_axis=(mesh, None))
+    # params = to_device_params_tree(params, mesh_and_axis=(mesh, None))
+    params = jax.tree.map(lambda x: jax.device_put(x.astype(jnp.bfloat16),
+                                                   jax.sharding.NamedSharding(
+                                                       mesh,
+                                                       jax.sharding.PartitionSpec(*((None,) * x.ndim)))), params)
 
     wrapped_model = eqx.filter_jit(qax.use_implicit_args(model.__call__))
 
