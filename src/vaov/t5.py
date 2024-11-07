@@ -4,6 +4,7 @@ from functools import partial
 from loguru import logger
 import jax.numpy as jnp
 import equinox as eqx
+from pathlib import Path
 from .quant_loading import load_thing, save_thing
 import numpy as np
 import jax
@@ -33,10 +34,16 @@ def quantize_params_tree(params, **kwargs):
 def to_device(param, mesh_and_axis=None):
     if isinstance(param, QuantMatrix):
         return param.with_mesh_and_axis(mesh_and_axis)
-    return param
+    return jax.device_put(param, jax.sharding.NamedSharding(
+        mesh_and_axis[0],
+        jax.sharding.PartitionSpec(*((None,) * param.ndim))))
 
 def to_device_params_tree(params, **kwargs):
-    return jax.tree_util.tree_map_with_path(partial(to_device, **kwargs), params)
+    return jax.tree.map(
+        partial(to_device, **kwargs),
+        params,
+        is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue),
+    )
 
 if __name__ == "__main__":
     import jax_smi
@@ -63,16 +70,18 @@ if __name__ == "__main__":
     encoder_input = jnp.repeat(encoder_input, 16, axis=0)
     encoder_input = shard_inputs(encoder_input)
 
+    quantized_path = Path("somewhere/quantized_t5")
     logger.info("Loading model")
     model, params = FlaxT5EncoderModel.from_pretrained(model_name, _do_init=False, dtype=jnp.bfloat16)
-    # logger.info("Quantizing model")
-    # params = quantize_params_tree(params)
+    if not quantized_path.exists():
+        logger.info("Quantizing model")
+        params = quantize_params_tree(params)
+        logger.info("Saving quantized model")
+        save_thing(params, quantized_path)
+    else:
+        params = load_thing(quantized_path)
     logger.info("Moving model to device")
-    # params = to_device_params_tree(params, mesh_and_axis=(mesh, None))
-    params = jax.tree.map(lambda x: jax.device_put(x.astype(jnp.bfloat16),
-                                                   jax.sharding.NamedSharding(
-                                                       mesh,
-                                                       jax.sharding.PartitionSpec(*((None,) * x.ndim)))), params)
+    params = to_device_params_tree(params, mesh_and_axis=(mesh, None))
 
     wrapped_model = eqx.filter_jit(qax.use_implicit_args(model.__call__))
 

@@ -1,4 +1,5 @@
 import jax
+from pathlib import Path
 from .quant import QuantMatrix
 import jax.numpy as jnp
 import qax
@@ -39,18 +40,20 @@ def load_quantized(restored_treedef, restored_vals):
 
 
 def restore_array(path):
-    checkpointer = ocp.PyTreeCheckpointer()
-    vals_meta = checkpointer.metadata(path)
-    sharding = jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0])
-    restore_args = ocp.checkpoint_utils.construct_restore_args(
-        vals_meta,
-        sharding_tree=jax.tree.map(lambda _: sharding, vals_meta)
-    )
-    restored_vals = checkpointer.restore(path, restore_args=restore_args)
+    with jax.default_device(jax.devices("cpu")[0]):
+        checkpointer = ocp.PyTreeCheckpointer()
+        vals_meta = checkpointer.metadata(path)
+        sharding = jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0])
+        restore_args = ocp.checkpoint_utils.construct_restore_args(
+            vals_meta,
+            sharding_tree=jax.tree.map(lambda _: sharding, vals_meta)
+        )
+        restored_vals = checkpointer.restore(path, restore_args=restore_args)
     return restored_vals
 
 
 def save_thing(value, og_path):
+    og_path = Path(og_path).resolve()
     treedef, vals = save_quantized(value)
     path = ocp.test_utils.erase_and_create_empty(og_path)
     checkpointer = ocp.PyTreeCheckpointer()
@@ -63,6 +66,7 @@ def save_thing(value, og_path):
 
 
 def load_thing(path):
+    path = Path(path).resolve()
     treedef = restore_array(path / "treedef")
     vals = restore_array(path / "vals")
     return load_quantized(treedef, vals)

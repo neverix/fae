@@ -13,9 +13,3 @@ print(
     np.mean(np.abs(t5_emb)),
     np.mean(np.abs(t5_emb_2)),
 )
-print(
-    np.mean(np.abs(t5_emb - t5_emb_2), -1)[0],
-    np.mean(np.abs(t5_emb), -1)[0],
-    np.mean(np.abs(t5_emb_2), -1)[0],
-)
-
