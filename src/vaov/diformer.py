@@ -113,10 +113,14 @@ def attention(
             return jax.vmap(attention, in_axes=(0, 0, 0, 0))(q, k, v, pe)
 
     q, k = apply_rope(q, k, pe)
+    # q = q.transpose((0, 2, 1, 3))
+    # k = k.transpose((0, 2, 1, 3))
+    # v = v.transpose((0, 2, 1, 3))
+    # return rearrange(jax.nn.dot_product_attention(q, k, v), "... h n -> ... (h n)")
+    
     q = q / math.sqrt(q.shape[-1])
 
     segment_ids = None
-    mask = None
     if mask is not None:
         q_segment_ids = mask.astype(jnp.int32)
         kv_segment_ids = mask.astype(jnp.int32)
@@ -965,6 +969,10 @@ class ImageOutput(DotDict):
         return prediction
     
     @property
+    def ground_truth(self):
+        return self.previous_input.noise - self.previous_input.encoded
+    
+    @property
     def denoised(self):
         noised, timesteps = self.previous_input.noised, self.previous_input.timesteps
         prediction = self.prediction
@@ -1081,6 +1089,7 @@ class DiFormerInferencer:
 
     def image_input(self, images, timesteps=0, guidance_scale=3.5, key=None):
         encoded = self.vae.encode(jnp.concatenate([self.vae.preprocess(image) for image in images], 0))
+        encoded = encoded.astype(jnp.float32)
         if encoded.shape[-1] % 2:
             encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 0), (0, 1)))
         if encoded.shape[-2] % 2:
@@ -1110,6 +1119,7 @@ def main():
     from PIL import Image
     dog_image_url = "https://www.akc.org/wp-content/uploads/2017/11/Shiba-Inu-standing-in-profile-outdoors.jpg"
     dog_image = Image.open(requests.get(dog_image_url, stream=True).raw)
+    dog_image = dog_image.resize((256, 256))
 
     torch.set_grad_enabled(False)
     text_encodings = torch.load("somewhere/res.pt", map_location=torch.device("cpu"), weights_only=True)
@@ -1125,7 +1135,7 @@ def main():
     inferencer = DiFormerInferencer(mesh)
     logger.info("Creating inputs")
     batch_size = 4
-    image_inputs = inferencer.image_input([dog_image] * batch_size, timesteps=0.8)
+    image_inputs = inferencer.image_input([dog_image] * batch_size, timesteps=0.5, key=jax.random.key(1))
     text_inputs = inferencer.text_input(t5_emb.repeat(batch_size, 1, 1), clip_emb.repeat(batch_size, 1))
     logger.info("Running model")
     result = inferencer(text_inputs, image_inputs)
@@ -1134,6 +1144,9 @@ def main():
     pred_noise = result.noise[0, :1]
     noise = image_inputs.noise[0, :1]
     print(jnp.mean(jnp.abs(noise)), jnp.mean(jnp.abs(pred_noise)), jnp.mean(jnp.abs(noise - pred_noise)))
+    print(jnp.mean(jnp.square(result.prediction - result.ground_truth)))
+    print(jnp.mean(jnp.square(jax.random.normal(jax.random.key(0), result.prediction.shape) - result.ground_truth)))
+    
     logger.info("Saving results")
     vae = inferencer.vae
     denoised = result.denoised[0, :1]
