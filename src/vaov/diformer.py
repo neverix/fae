@@ -10,7 +10,7 @@ import jax.experimental.shard_map
 from safetensors.numpy import load_file
 import ml_dtypes
 from functools import partial
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from collections import defaultdict
 from jaxtyping import Array, Float, UInt, Bool
 from typing import Optional, Tuple
@@ -33,6 +33,7 @@ import math
 import numpy as np
 from loguru import logger
 from typing import TypeVar, Generic
+from oryx.core.interpreters.harvest import sow, call_and_reap
 import threading
 
 @dataclass(frozen=True)
@@ -551,6 +552,15 @@ def pad_and_mask(x, pad_to=128):
     return x, mask
 
 
+def sow_debug(val, name, **kwargs):
+    if isinstance(val, dict):
+        results = {}
+        for key, value in val.items():
+            results[key] = sow_debug(value, f"{name}.{key}", **kwargs)
+        return results
+    return sow(val, tag="debug", name=name, **kwargs)
+
+
 class DiFormer(eqx.Module):
     """Diffusion transformer."""
     config_cls = DiFormerConfig
@@ -647,15 +657,19 @@ class DiFormer(eqx.Module):
         
         mask = jnp.concatenate((txt_mask, img_mask), -1)
         data = dict(img=img, txt=txt)
+        sow_debug(dict(img=img, txt=txt, vec=vec, pe=pe, mask=mask), "pre_double")
 
         data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
 
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
+        sow_debug(dict(data=data), "pre_single")
         data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
         img = data[..., txt.shape[-2]:, :]
 
+        sow_debug(dict(data=img), "pre_final")
         img = self.final_layer(img, vec)[..., :orig_img_len, :]
+        sow_debug(dict(img=img), "final_img")
         
         return img
 
@@ -915,6 +929,9 @@ class DotDict(eqx.Module):
     def __getitem__(self, key):
         return getattr(self, key)
 
+    def to_dict(self):
+        return asdict(self)
+
 
 class ImageInput(DotDict):
     encoded: Float[Array, "*batch c h w"]
@@ -960,6 +977,7 @@ class ImageInput(DotDict):
 class ImageOutput(DotDict):
     previous_input: ImageInput
     patched: Float[Array, "*batch n_seq (patch_size patch_size in_channels)"]
+    reaped: Optional[dict]
     
     @property
     def prediction(self):
@@ -992,6 +1010,13 @@ class ImageOutput(DotDict):
             guidance_scale=self.previous_input.guidance_scale,
         )
 
+@partial(jax.jit, static_argnums=(1,), static_argnames=("debug_mode",))
+@qax.use_implicit_args
+def run_model_(weights, logic, kwargs, debug_mode=False):
+    model = eqx.combine(weights, logic)
+    if debug_mode:
+        return call_and_reap(model, tag="debug")(**kwargs)
+    return model(**kwargs)
 
 class DiFormerInferencer:
     def __init__(self,
@@ -1030,35 +1055,14 @@ class DiFormerInferencer:
         weights = jax.tree.map(to_mesh, weights, is_leaf=is_arr)
         self.weights, self.logic = weights, logic
 
-    def __call__(self, text_inputs, image_inputs):
+    def __call__(self, text_inputs, image_inputs, debug_mode=False):
         img, timesteps, img_ids, guidance_scale, h, w = [image_inputs[k] for k in (
             "patched", "timesteps", "img_ids", "guidance_scale", "h", "w"
         )]
         txt, vec_in = [text_inputs[k] for k in (
             "txt", "vec_in"
         )]
-        patched = self.run_model(
-            self.logic,
-            weights=self.weights,
-            img=img,
-            txt=txt,
-            timesteps=timesteps,
-            vec_in=vec_in,
-            img_ids=img_ids,
-            guidance_scale=guidance_scale
-        )
-        return ImageOutput(
-            previous_input=image_inputs,
-            patched=patched,
-        )
-        
-
-    @staticmethod
-    @partial(jax.jit, static_argnums=(0,))
-    @qax.use_implicit_args
-    def run_model(logic, *, weights, img, txt, timesteps, vec_in, img_ids, guidance_scale):
-        model = eqx.combine(weights, logic)
-        model_outputs = model(
+        kwargs = dict(
             img=img,
             txt=txt,
             timesteps=timesteps,
@@ -1066,7 +1070,15 @@ class DiFormerInferencer:
             img_ids=img_ids,
             guidance=guidance_scale,
         )
-        return model_outputs
+        results = run_model_(self.weights, self.logic, kwargs, debug_mode=debug_mode)
+        reaped = None
+        if debug_mode:
+            patched, reaped = results
+        return ImageOutput(
+            previous_input=image_inputs,
+            patched=patched,
+            reaped=reaped
+        )
 
     def to_mesh(self, x, already_sharded=False):
         def to_mesh_fn(x):
@@ -1138,7 +1150,7 @@ def main():
     image_inputs = inferencer.image_input([dog_image] * batch_size, timesteps=0.5, key=jax.random.key(1))
     text_inputs = inferencer.text_input(t5_emb.repeat(batch_size, 1, 1), clip_emb.repeat(batch_size, 1))
     logger.info("Running model")
-    result = inferencer(text_inputs, image_inputs)
+    result = inferencer(text_inputs, image_inputs, debug_mode=True)
     
     logger.info("Comparing results")
     pred_noise = result.noise[0, :1]
@@ -1146,7 +1158,15 @@ def main():
     print(jnp.mean(jnp.abs(noise)), jnp.mean(jnp.abs(pred_noise)), jnp.mean(jnp.abs(noise - pred_noise)))
     print(jnp.mean(jnp.square(result.prediction - result.ground_truth)))
     print(jnp.mean(jnp.square(jax.random.normal(jax.random.key(0), result.prediction.shape) - result.ground_truth)))
-    
+    print({k: v.shape for k, v in result.reaped.items()})
+    def tt(v):
+        if isinstance(v, jnp.ndarray):
+            return torch.from_numpy(np.asarray(v[0, :1].astype(jnp.float32)))
+        return v
+    torch.save({k: tt(v) for k, v in result.reaped.items()}, "somewhere/reaped.pt")
+    torch.save({k: tt(v) for k, v in image_inputs.to_dict().items()}, "somewhere/image_inputs.pt")
+    torch.save({k: tt(v) for k, v in text_inputs.items()}, "somewhere/text_inputs.pt")
+
     logger.info("Saving results")
     vae = inferencer.vae
     denoised = result.denoised[0, :1]
