@@ -26,11 +26,11 @@ class FluxVAE(eqx.Module):
 
     @eqx.filter_jit
     def decode(self, encoded):
-        return self.decoder_rep.run({"input": encoded})
+        return self.decoder_rep.run({"input": encoded})[0]
 
     def deprocess(self, decoded):
         return Image.fromarray(
-            ((np.asarray(decoded)[0].transpose(0, 2, 3, 1)) * 255.0)
+            ((np.asarray(decoded).transpose(0, 2, 3, 1)) * 255.0)
             .clip(0, 255)
             .astype(np.uint8)[0]
         ).convert("RGB")

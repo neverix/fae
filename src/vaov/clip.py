@@ -1,4 +1,5 @@
 from transformers import AutoTokenizer, AutoConfig, FlaxCLIPTextModel
+from loguru import logger
 import jax.numpy as jnp
 import numpy as np
 import torch
@@ -6,12 +7,14 @@ import jax
 
 class CLIPInterface:
     def __init__(self, mesh, clip_name="openai/clip-vit-large-patch14"):
+        logger.info("Creating CLIP model")
         self.mesh = mesh
         self.input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", None))
 
         self.tokenizer = AutoTokenizer.from_pretrained(clip_name)
         self.config = AutoConfig.from_pretrained(clip_name)
 
+        logger.info("Loading CLIP model:", clip_name)
         with jax.default_device(jax.devices("cpu")[0]):
             self.model, params = FlaxCLIPTextModel.from_pretrained(
                 clip_name, _do_init=False, dtype=jnp.bfloat16

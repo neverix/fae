@@ -906,6 +906,85 @@ def from_torch(x):
         x = jnp.array(x)
     return x
 
+
+class DotDict(eqx.Module):
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+
+class ImageInput(DotDict):
+    encoded: Float[Array, "*batch c h w"]
+    noise: Float[Array, "*batch c h w"]
+    timesteps: Float[Array, "*batch"]
+    guidance_scale: Float[Array, "*batch"]
+    
+    @property
+    def noised(self):
+        t = self.timesteps[..., None, None, None]
+        return self.encoded * (1 - t) + self.noise * t
+    
+    @property
+    def n_seq(self):
+        return self.h * self.w
+
+    @property
+    def h(self):
+        return self.encoded.shape[-2] // 2
+    
+    @property
+    def w(self):
+        return self.encoded.shape[-1] // 2
+    
+    @property
+    def batch_dims(self):
+        return self.encoded.shape[:-3]
+    
+    @property
+    def patched(self):
+        return rearrange(self.noised, "... c (h ph) (w pw) -> ... (h w) (c ph pw)", ph=2, pw=2)
+    
+    @property
+    def img_ids(self):
+        batch_dims, h, w = self.batch_dims, self.h, self.w
+        img_ids = jnp.zeros((*batch_dims, h, w, 3), dtype=jnp.uint32)
+        img_ids = img_ids.at[..., 1].add(jnp.arange(h)[:, None])
+        img_ids = img_ids.at[..., 2].add(jnp.arange(w)[None, :])
+        img_ids = img_ids.reshape(*batch_dims, -1, 3)
+        return img_ids
+
+
+class ImageOutput(DotDict):
+    previous_input: ImageInput
+    patched: Float[Array, "*batch n_seq (patch_size patch_size in_channels)"]
+    
+    @property
+    def prediction(self):
+        h, w = self.previous_input.h, self.previous_input.w
+        prediction = rearrange(self.patched, "... (h w) (c ph pw) -> ... c (h ph) (w pw)",
+                          ph=2, pw=2, h=h, w=w)
+        return prediction
+    
+    @property
+    def denoised(self):
+        noised, timesteps = self.previous_input.noised, self.previous_input.timesteps
+        prediction = self.prediction
+        return noised - timesteps[..., None, None, None] * prediction
+
+    @property
+    def noise(self):
+        noised, timesteps = self.previous_input.noised, self.previous_input.timesteps
+        prediction = self.prediction
+        return noised + (1 - timesteps[..., None, None, None]) * prediction
+
+    def next_input(self, time: float):
+        return ImageInput(
+            encoded=self.denoised,
+            noise=self.noise,
+            timesteps=self.previous_input.timesteps - time,
+            guidance_scale=self.previous_input.guidance_scale,
+        )
+
+
 class DiFormerInferencer:
     def __init__(self,
                  mesh,
@@ -960,13 +1039,9 @@ class DiFormerInferencer:
             img_ids=img_ids,
             guidance_scale=guidance_scale
         )
-        prediction = rearrange(patched, "b d (h w) (c ph pw) -> b d c (h ph) (w pw)",
-                          ph=2, pw=2, h=h, w=w)
-        denoised = image_inputs["noised"] - timesteps[..., None, None, None] * prediction
-        return dict(
+        return ImageOutput(
+            previous_input=image_inputs,
             patched=patched,
-            prediction=prediction,
-            denoised=denoised,
         )
         
 
@@ -985,20 +1060,24 @@ class DiFormerInferencer:
         )
         return model_outputs
 
-    def to_mesh(self, x):
+    def to_mesh(self, x, already_sharded=False):
         def to_mesh_fn(x):
             if not isinstance(x, jnp.ndarray):
+                return x
+            if already_sharded:
                 return x
             x = x.reshape(self.mesh.shape["dp"], -1, *x.shape[1:])
             return jax.device_put(x, jax.sharding.NamedSharding(
                 self.mesh, jax.sharding.PartitionSpec("dp", "fsdp", *((None,) * (x.ndim - 2)))))
         return jax.tree.map(to_mesh_fn, x)
 
-    def text_input(self, t5_emb, clip_emb):
-        return self.to_mesh(dict(
-            txt=from_torch(t5_emb),
-            vec_in=from_torch(clip_emb),
-        ))
+    def text_input(self, t5_emb, clip_emb, clip_already_sharded=False, t5_already_sharded=False):
+        txt = self.to_mesh(from_torch(t5_emb), already_sharded=t5_already_sharded)
+        vec_in = self.to_mesh(from_torch(clip_emb), already_sharded=clip_already_sharded)
+        return dict(
+            txt=txt,
+            vec_in=vec_in,
+        )
 
     def image_input(self, images, timesteps=0, guidance_scale=3.5, key=None):
         encoded = self.vae.encode(jnp.concatenate([self.vae.preprocess(image) for image in images], 0))
@@ -1015,31 +1094,12 @@ class DiFormerInferencer:
 
         if isinstance(guidance_scale, (int, float)):
             guidance_scale = jnp.full((batch,), guidance_scale, dtype=jnp.float32)
-
-        t = timesteps[..., None, None, None]
-        noised = encoded * (1 - t) + noise * t
-        
-        patched = rearrange(noised, "b c (h ph) (w pw) -> b h w (c ph pw)", ph=2, pw=2)
-        h, w = patched.shape[-3:-1]
-        patched = rearrange(patched, "b h w c -> b (h w) c")
-        n_seq = patched.shape[-2]
-        
-        img_ids = jnp.zeros((batch, h, w, 3), dtype=jnp.uint32)
-        img_ids = img_ids.at[..., 1].add(jnp.arange(h)[:, None])
-        img_ids = img_ids.at[..., 2].add(jnp.arange(w)[None, :])
-        img_ids = img_ids.reshape(batch, -1, 3)
     
-        return self.to_mesh(dict(
+        return self.to_mesh(ImageInput(
             encoded=encoded,
             noise=noise,
-            noised=noised,
             timesteps=timesteps,
             guidance_scale=guidance_scale,
-            patched=patched,
-            img_ids=img_ids,
-            h=h,
-            w=w,
-            n_seq=n_seq,   
         ))
 
 
@@ -1065,14 +1125,18 @@ def main():
     inferencer = DiFormerInferencer(mesh)
     logger.info("Creating inputs")
     batch_size = 4
-    image_inputs = inferencer.image_input([dog_image] * batch_size, timesteps=0.3)
+    image_inputs = inferencer.image_input([dog_image] * batch_size, timesteps=0.8)
     text_inputs = inferencer.text_input(t5_emb.repeat(batch_size, 1, 1), clip_emb.repeat(batch_size, 1))
     logger.info("Running model")
     result = inferencer(text_inputs, image_inputs)
     
+    logger.info("Comparing results")
+    pred_noise = result.noise[0, :1]
+    noise = image_inputs.noise[0, :1]
+    print(jnp.mean(jnp.abs(noise)), jnp.mean(jnp.abs(pred_noise)), jnp.mean(jnp.abs(noise - pred_noise)))
     logger.info("Saving results")
     vae = inferencer.vae
-    denoised = result["denoised"][0, :1]
+    denoised = result.denoised[0, :1]
     generated = vae.deprocess(vae.decode(denoised))
     generated.save("somewhere/denoised.jpg")
 
