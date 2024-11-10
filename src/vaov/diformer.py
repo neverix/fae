@@ -1,37 +1,23 @@
 # https://github.com/black-forest-labs/flux/blob/main/src/flux/model.py
 import equinox as eqx
-import os
-import torch
-import random
-import fire
 from equinox import nn
 import jax.experimental
 import jax.experimental.shard_map
 from safetensors.numpy import load_file
-import ml_dtypes
 from functools import partial
-from dataclasses import dataclass, asdict
 from collections import defaultdict
-from jaxtyping import Array, Float, UInt, Bool
-from typing import Optional, Tuple
+from huggingface_hub import hf_hub_download
+from jaxtyping import Array, Float, UInt
+from typing import Optional
 from .quant import QuantMatrix
 from .quant_loading import load_thing, save_thing
 import qax.primitives
 import qax
-from jax.experimental import mesh_utils
 import jax.numpy as jnp
-from tqdm.auto import tqdm
-from .vae import FluxVAE
-from einops import rearrange
 import jax
-import orbax.checkpoint as ocp
 from pathlib import Path
-import math
-import numpy as np
 from loguru import logger
 from typing import TypeVar, Generic
-from oryx.core.interpreters.harvest import sow, call_and_reap
-import threading
 from .diflayers import (
     SingleStreamBlock, DoubleStreamBlock, LastLayer, timestep_embedding, EmbedND, MLPEmbedder,
     VLinear, DiFormerConfig, sow_debug, timestep_embedding)
@@ -379,12 +365,134 @@ def preprocess_weights(flux, model):
     return flux
 
 
-def load_flux(model, path="somewhere/flux.st", preprocess_into="somewhere/flux_prep"):
+def preprocess_official(flux, model):
+    logger.info("Layer-stacking arrays")
+    flux_aggs = defaultdict(dict)
+    new_flux = {}
+    for key, value in flux.items():
+        if key.startswith("double_blocks") or key.startswith("single_blocks"):
+            base, _, key = key.partition(".")
+            index, _, key = key.partition(".")
+            flux_aggs[f"{base}.{key}"][int(index)] = value
+        else:
+            new_flux[key] = value
+    for key, values in flux_aggs.items():
+        new_weight = jnp.stack(
+            [values[i] for i in list(range(max(values.keys()) + 1))], 0
+        )
+        new_flux[key] = new_weight
+    flux = new_flux
+
+    flux = {k.replace("attn.norm", "attn.qk_norm"): v for k, v in flux.items()}
+    flux = {k.replace("attn.proj", "attn.o_proj"): v for k, v in flux.items()}
+    flux = {k.replace("attn.qkv.", "attn.qkv_proj."): v for k, v in flux.items()}
+    flux = {k.replace("mlp.0.", "mlp.in_proj."): v for k, v in flux.items()}
+    flux = {k.replace("mlp.2.", "mlp.out_proj."): v for k, v in flux.items()}
+
+    # fold in nf4 arrays
+    logger.info("Loading in quantized arrays")
+    array_flux = {}
+    nf4_flux = defaultdict(dict)
+    for key, value in flux.items():
+        if ".weight" in key:
+            key, dot_weight, name = key.partition(".weight")
+            nf4_flux[key + dot_weight][name] = value
+        else:
+            array_flux[key] = jnp.asarray(value)
+    for key, values in nf4_flux.items():
+        x = values[""]
+        x = x.transpose(*range(0, x.ndim - 2), x.ndim - 1, x.ndim - 2)
+        
+        if key == "single_blocks.linear1.weight":
+            og_shape = (
+                model.config.depth_single_blocks,
+                model.config.hidden_size,
+                model.config.hidden_size * 3 + model.config.mlp_size,
+            )
+            og_dtype = jnp.bfloat16
+        elif key == "single_blocks.linear2.weight":
+            og_shape = (
+                model.config.depth_single_blocks,
+                model.config.hidden_size + model.config.mlp_size,
+                model.config.hidden_size,
+            )
+            og_dtype = jnp.bfloat16
+        else:
+            try:
+                og_tensor = selector_fn(key)(model)
+            except (AttributeError, TypeError) as e:
+                raise AttributeError(f"Can't get {key}") from e
+            if og_tensor is None:
+                raise AttributeError(f"{key} is not initialized")
+            og_shape = og_tensor.shape
+            og_dtype = og_tensor.dtype
+        
+        array_flux[key] = x
+    flux = array_flux
+
+    logger.info("Splitting linear1/linear2")
+    flux = {k.replace("norm.scale", "norm.weight"): v for k, v in flux.items()}
+    linear1 = flux.pop("single_blocks.linear1.weight")
+    qkv, mlp = (
+        weight_slice(linear1, axis=-1, start=0, size=model.config.hidden_size * 3),
+        weight_slice(
+            linear1,
+            axis=-1,
+            start=model.config.hidden_size * 3,
+            size=model.config.mlp_size,
+        ),
+    )
+    flux["single_blocks.attn.qkv_proj.weight"] = qkv
+    flux["single_blocks.mlp.in_proj.weight"] = mlp
+    linear1 = flux.pop("single_blocks.linear1.bias")
+    qkv, mlp = (
+        linear1[..., : model.config.hidden_size * 3],
+        linear1[..., model.config.hidden_size * 3 :],
+    )
+    flux["single_blocks.attn.qkv_proj.bias"] = qkv
+    flux["single_blocks.mlp.in_proj.bias"] = mlp
+    linear2 = flux.pop("single_blocks.linear2.weight")
+    qkv, mlp = (
+        weight_slice(linear2, axis=1, start=0, size=model.config.hidden_size),
+        weight_slice(
+            linear2,
+            axis=1,
+            start=model.config.hidden_size,
+            size=model.config.mlp_size,
+        ),
+    )
+    flux["single_blocks.attn.o_proj.weight"] = qkv
+    flux["single_blocks.mlp.out_proj.weight"] = mlp
+    linear2 = flux.pop("single_blocks.linear2.bias")
+    flux["single_blocks.attn.o_proj.bias"] = linear2
+    flux["single_blocks.mlp.out_proj.bias"] = linear2 * 0
+    norm_keys = [key for key in flux if key.startswith("single_blocks.norm")]
+    for key in norm_keys:
+        flux[key.replace("single_blocks.norm", "single_blocks.attn.qk_norm")] = (
+            flux.pop(key)
+        )
+    return flux
+
+
+def load_flux(
+    model,
+    path=None,
+    # path="somewhere/flux.st",
+    hf_path=("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
+    # preprocess_into="somewhere/flux_prep",
+    preprocess_into=None,
+):
     logger.info(f"Loading flux from {path}")
     preprocess_into = Path(preprocess_into).resolve() if preprocess_into else None
     if preprocess_into is None or not preprocess_into.exists():
-        flux = load_file(path)
-        flux = preprocess_weights(flux, model)
+        if path is not None:
+            flux = load_file(path)
+            flux = preprocess_weights(flux, model)
+        else:
+            flux = load_file(hf_hub_download(
+                repo_id=hf_path[0], filename=hf_path[1],
+            ))
+            flux = preprocess_official(flux, model)
         if preprocess_into is not None:
             logger.info("Saving preprocessed flux")
             save_thing(flux, preprocess_into)
@@ -409,4 +517,3 @@ def load_flux(model, path="somewhere/flux.st", preprocess_into="somewhere/flux_p
             raise AttributeError(f"Error at {key}") from e
 
     return model
-
