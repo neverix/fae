@@ -391,7 +391,7 @@ def preprocess_official(flux, model):
     flux = {k.replace("mlp.2.", "mlp.out_proj."): v for k, v in flux.items()}
 
     # fold in nf4 arrays
-    logger.info("Loading in quantized arrays")
+    logger.info("Quantizing arrays")
     array_flux = {}
     nf4_flux = defaultdict(dict)
     for key, value in flux.items():
@@ -431,7 +431,7 @@ def preprocess_official(flux, model):
             continue
         if "mod" in key:
             continue
-        x = QuantMatrix.quantize(x, mode="i8")
+        # x = QuantMatrix.quantize(x, mode="i8")
         array_flux[key] = x
     flux = array_flux
 
@@ -486,10 +486,10 @@ def load_flux(
     path=None,
     # path="somewhere/flux.st",
     hf_path=("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
-    preprocess_into="somewhere/flux_prep",
-    # preprocess_into=None,
+    # preprocess_into="somewhere/flux_prep",
+    preprocess_into=None,
 ):
-    logger.info(f"Loading flux from {path}")
+    logger.info(f"Loading flux from {path or hf_path}")
     preprocess_into = Path(preprocess_into).resolve() if preprocess_into else None
     if preprocess_into is None or not preprocess_into.exists():
         if path is not None:

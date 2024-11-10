@@ -284,7 +284,7 @@ def main():
     )
     t5_emb, clip_emb = text_encodings[:2]
 
-    shape_request = (-1, 2, 1)
+    shape_request = (-1, 4, 1)
     device_count = jax.device_count("tpu")
     mesh_shape = np.arange(device_count).reshape(*shape_request).shape
     physical_mesh = mesh_utils.create_device_mesh(mesh_shape)

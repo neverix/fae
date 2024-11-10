@@ -14,7 +14,8 @@ def save_quantized(a):
         a, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
     )
     logger.info("Creating dummies")
-    treedef = jax.tree.unflatten(treedef, [jnp.zeros((1,)) for _ in vals])
+    ten = jnp.zeros((1,))
+    treedef = jax.tree.unflatten(treedef, [ten for _ in vals])
     logger.info("Processing flat values")
     new_vals = []
     for val in vals:
@@ -58,23 +59,25 @@ def restore_array(path):
 
 def save_thing(value, og_path):
     logger.info("Creating values for saving")
-    treedef, vals = save_quantized(value)
-    logger.info("Saving values")
-    og_path = Path(og_path).resolve()
-    path = ocp.test_utils.erase_and_create_empty(og_path)
-    checkpointer = ocp.PyTreeCheckpointer()
-    try:
-        logger.info("Saving treedef")
-        checkpointer.save(path / "treedef", treedef)
-        logger.info("Saving flat values")
-        checkpointer.save(path / "vals", vals)
-    except ValueError:
-        shutil.rmtree(og_path)
-        raise
+    with jax.default_device(jax.devices("cpu")[0]):
+        treedef, vals = save_quantized(value)
+        logger.info("Saving values")
+        og_path = Path(og_path).resolve()
+        path = ocp.test_utils.erase_and_create_empty(og_path)
+        checkpointer = ocp.PyTreeCheckpointer()
+        try:
+            logger.info("Saving treedef")
+            checkpointer.save(path / "treedef", treedef)
+            logger.info("Saving flat values")
+            checkpointer.save(path / "vals", vals)
+        except ValueError:
+            shutil.rmtree(og_path)
+            raise
 
 
 def load_thing(path):
     path = Path(path).resolve()
-    treedef = restore_array(path / "treedef")
-    vals = restore_array(path / "vals")
-    return load_quantized(treedef, vals)
+    with jax.default_device(jax.devices("cpu")[0]):
+        treedef = restore_array(path / "treedef")
+        vals = restore_array(path / "vals")
+        return load_quantized(treedef, vals)
