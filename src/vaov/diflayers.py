@@ -98,10 +98,11 @@ def attention(
             return jax.vmap(attention, in_axes=(0, 0, 0, 0))(q, k, v, pe)
 
     q, k = apply_rope(q, k, pe)
-    # q = q.transpose((0, 2, 1, 3))
-    # k = k.transpose((0, 2, 1, 3))
-    # v = v.transpose((0, 2, 1, 3))
-    # return rearrange(jax.nn.dot_product_attention(q, k, v), "... h n -> ... (h n)")
+    if jax.devices()[0].platform == "cpu":
+        q = q.transpose((0, 2, 1, 3))
+        k = k.transpose((0, 2, 1, 3))
+        v = v.transpose((0, 2, 1, 3))
+        return rearrange(jax.nn.dot_product_attention(q, k, v), "... h n -> ... (h n)")
 
     q = q / math.sqrt(q.shape[-1])
 
@@ -146,14 +147,14 @@ def timestep_embedding(
     t = time_factor * t
     half = dim // 2
     freqs = jnp.exp(
-        -math.log(max_period) * jnp.arange(0, half, dtype=jnp.float32) / half
+        -math.log(max_period) * jnp.arange(half, dtype=jnp.float32) / half
     )
 
-    args = t[..., None].astype(jnp.float32) * freqs[None]
+    args = t[..., None].astype(jnp.float32) * freqs
     embedding = jnp.concatenate([jnp.cos(args), jnp.sin(args)], axis=-1)
     if dim % 2:
         embedding = jnp.concatenate(
-            [embedding, jnp.zeros_like(embedding[..., :1])], dim=-1
+            [embedding, jnp.zeros_like(embedding[..., :1])], axis=-1
         )
     return embedding
 

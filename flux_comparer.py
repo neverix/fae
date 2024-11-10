@@ -39,7 +39,7 @@ guidance_vec = torch.full(
     (img_torch.shape[0],), 3.5, device=img_torch.device, dtype=img_torch.dtype
 )
 t_vec = torch.full(
-    (img_torch.shape[0],), 0.1, dtype=img_torch.dtype, device=img_torch.device
+    (img_torch.shape[0],), 0.5, dtype=img_torch.dtype, device=img_torch.device
 )
 
 print({k: v.shape for k, v in text_inputs.items()})

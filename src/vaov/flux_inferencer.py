@@ -269,6 +269,9 @@ class DiFormerInferencer:
 
 
 def main():
+    import jax_smi
+    jax_smi.initialise_tracking()
+    
     logger.info("Creating inputs")
 
     import requests
@@ -284,8 +287,9 @@ def main():
     )
     t5_emb, clip_emb = text_encodings[:2]
 
-    shape_request = (-1, 4, 1)
-    device_count = jax.device_count("tpu")
+    logger.info("Creating mesh")
+    shape_request = (1, -1, 1)
+    device_count = jax.device_count()
     mesh_shape = np.arange(device_count).reshape(*shape_request).shape
     physical_mesh = mesh_utils.create_device_mesh(mesh_shape)
     mesh = jax.sharding.Mesh(physical_mesh, ("dp", "fsdp", "tp"))
@@ -293,7 +297,7 @@ def main():
     logger.info("Creating inferencer")
     inferencer = DiFormerInferencer(mesh)
     logger.info("Creating inputs")
-    batch_size = 4
+    batch_size = device_count
     image_inputs = inferencer.image_input(
         [dog_image] * batch_size, timesteps=0.5, key=jax.random.key(1)
     )

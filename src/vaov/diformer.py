@@ -3,6 +3,7 @@ import equinox as eqx
 from equinox import nn
 import jax.experimental
 import jax.experimental.shard_map
+import qax.quantization
 from safetensors.numpy import load_file
 from functools import partial
 from collections import defaultdict
@@ -154,12 +155,19 @@ class DiFormer(eqx.Module):
             Processed image tensor.
         """
         img = self.img_in(img)
-        vec = self.time_in(timestep_embedding(timesteps, self.config.time_embed_dim))
+        time_emb = timestep_embedding(timesteps, self.config.time_embed_dim)
+        sow_debug(dict(time_emb=time_emb, y=y), "pre_basic_vec")
+        vec = self.time_in(time_emb)
+        sow_debug(dict(vec=vec), "basic_vec")
         if self.config.guidance_embed:
             if guidance is None:
                 raise ValueError("Didn't get guidance strength for guidance distilled model.")
-            vec = vec + self.guidance_in(timestep_embedding(guidance, self.config.guidance_embed_dim))
+            g_emb = timestep_embedding(guidance.astype(jnp.bfloat16), self.config.guidance_embed_dim)
+            sow_debug(dict(g_emb=g_emb, guidance=guidance), "guidance_emb")
+            vec = vec + self.guidance_in(g_emb)
+        sow_debug(dict(vec=vec), "guidance_vec")
         vec = vec + self.vector_in(y)
+        sow_debug(dict(vec=vec), "vec")
 
         txt = self.txt_in(txt)
         
@@ -427,11 +435,11 @@ def preprocess_official(flux, model):
                 raise AttributeError(f"{key} is not initialized")
             og_shape = og_tensor.shape
             og_dtype = og_tensor.dtype
+        x = x.astype(jnp.bfloat16)
         if ("single_blocks" not in key and "double_blocks" not in key) or "mod" in key:
-            x = x.astype(jnp.bfloat16)
             array_flux[key] = x
             continue
-        x = QuantMatrix.quantize(x, mode="i8")
+        x = QuantMatrix.quantize(x, mode="i8", group_size=8)
         array_flux[key] = x
     flux = array_flux
 

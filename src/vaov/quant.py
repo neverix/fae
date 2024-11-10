@@ -237,7 +237,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
             compiler_params=dict(
                 mosaic=dict(dimension_semantics=("parallel", "parallel", "arbitrary"))
             ),
-            interpret=False,
+            interpret=jax.devices()[0].platform == "cpu",
         )(inputs, *tensors)
         if backward:
             outputs = outputs.reshape(outputs.shape[0], -1, 2, block_y // 2).mT.reshape(
@@ -382,8 +382,8 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=True):
     mesh_and_axis: Optional[Tuple[jax.sharding.Mesh, Optional[int]]] = qax.aux_field()
 
     @staticmethod
-    def quantize(mat, mode="nf4"):
-        quants, scales = quantize_vmap(mat, mode)
+    def quantize(mat, mode="nf4", **kwargs):
+        quants, scales = quantize_vmap(mat, mode, **kwargs)
         return QuantMatrix(
             quants=quants,
             scales=scales,
@@ -610,7 +610,7 @@ def quantize_groups(group, codebook, mode="nf4"):
         errors = scaled[..., None] - codebook
         quants = jnp.argmin(jnp.abs(errors), axis=-1)
     elif mode == "i8":
-        scaled = scaled * 127.5
+        scaled = scaled * 127.5 - 0.5
         quants = jnp.clip(scaled.round(), -128, 127).astype(jnp.int8)
     
     return quants, scale
