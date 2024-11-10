@@ -5,13 +5,17 @@ import jax.numpy as jnp
 import qax
 import orbax.checkpoint as ocp
 import shutil
+from loguru import logger
 
 
 def save_quantized(a):
+    logger.info("Flattening")
     vals, treedef = jax.tree.flatten(
         a, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
     )
+    logger.info("Creating dummies")
     treedef = jax.tree.unflatten(treedef, [jnp.zeros((1,)) for _ in vals])
+    logger.info("Processing flat values")
     new_vals = []
     for val in vals:
         if isinstance(val, QuantMatrix):
@@ -53,12 +57,16 @@ def restore_array(path):
 
 
 def save_thing(value, og_path):
-    og_path = Path(og_path).resolve()
+    logger.info("Creating values for saving")
     treedef, vals = save_quantized(value)
+    logger.info("Saving values")
+    og_path = Path(og_path).resolve()
     path = ocp.test_utils.erase_and_create_empty(og_path)
     checkpointer = ocp.PyTreeCheckpointer()
     try:
+        logger.info("Saving treedef")
         checkpointer.save(path / "treedef", treedef)
+        logger.info("Saving flat values")
         checkpointer.save(path / "vals", vals)
     except ValueError:
         shutil.rmtree(og_path)

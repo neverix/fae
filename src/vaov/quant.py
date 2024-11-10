@@ -277,32 +277,14 @@ def matmul_nf4_kernel(
     quants = quants_ref[...]
     scale = scale_ref[...]
 
-    quants = i4tou4(quants.astype(jnp.int32))
-    w1 = nf4xf32_to_f32(quants) * scale
+    if quants.dtype == jnp.int8:
+        w1 = (quants.astype(jnp.float32) / 127.5) * scale.astype(jnp.float32) 
+    else:
+        quants = i4tou4(quants.astype(jnp.int32))
+        w1 = nf4xf32_to_f32(quants) * scale
     inputs = inputs_ref[...]
     accum_ref[...] += jnp.dot(inputs, w1.reshape(block_k, -1), preferred_element_type=jnp.float32)
     
-    @pl.when(pl.program_id(axis=2) == (pl.num_programs(axis=2) - 1))
-    def _():
-        outputs_ref[...] = accum_ref[...].astype(outputs_ref.dtype)
-
-
-def matmul_i8_kernel(
-    inputs_ref, quants_ref, scale_ref, outputs_ref, accum_ref, *, block_k
-):
-    @pl.when(pl.program_id(axis=2) == 0)
-    def _():
-        accum_ref[...] = jnp.zeros_like(accum_ref)
-
-    quants = quants_ref[...]
-    scale = scale_ref[...]
-
-    scaled = quants * scale.astype(jnp.float32)
-    inputs = inputs_ref[...]
-    accum_ref[...] += jnp.dot(
-        inputs, scaled.reshape(block_k, -1), preferred_element_type=jnp.float32
-    )
-
     @pl.when(pl.program_id(axis=2) == (pl.num_programs(axis=2) - 1))
     def _():
         outputs_ref[...] = accum_ref[...].astype(outputs_ref.dtype)
@@ -352,20 +334,23 @@ def matmul_nf4_kernel_transpose(
     outputs_ref[...] = accum.astype(outputs_ref.dtype)
 
 
-def dequantize_group(group, scale, codebook, orig_dtype):
-    group = i4tou4(group.astype(np.int32))
+@partial(jax.jit, static_argnums=(3, 4))
+def dequantize_group(group, scale, codebook, orig_dtype, mode):
 
     # codebook = codebook.astype(orig_dtype)
-
-    stacked = nf4xf32_to_f32(group)
+    if mode == "nf4":
+        group = i4tou4(group.astype(np.int32))
+        stacked = nf4xf32_to_f32(group)
+    else:
+        stacked = group.astype(jnp.float32) / 127.5
 
     return (stacked * scale).reshape(-1).astype(orig_dtype)
 
 
-def dequantize_vmap(quants, scales, *, use_approx, orig_dtype):
+def dequantize_vmap(quants, scales, *, use_approx, orig_dtype, mode):
     if quants.ndim > 3:
         return jax.vmap(
-            partial(dequantize_vmap, use_approx=use_approx, orig_dtype=orig_dtype),
+            partial(dequantize_vmap, use_approx=use_approx, orig_dtype=orig_dtype, mode=mode),
             in_axes=(0, 0),
             out_axes=0)(quants, scales)
 
@@ -376,8 +361,8 @@ def dequantize_vmap(quants, scales, *, use_approx, orig_dtype):
     grouped = quants.transpose(2, 0, 1).reshape(-1, group_size)
     scales = scales.transpose(2, 0, 1).reshape(-1)
 
-    dequantized_groups = jax.vmap(dequantize_group, in_axes=(0, 0, None, None))(
-        grouped, scales, codebook, orig_dtype
+    dequantized_groups = jax.vmap(dequantize_group, in_axes=(0, 0, None, None, None))(
+        grouped, scales, codebook, orig_dtype, mode
     )
 
     unquant_matrix = dequantized_groups.reshape(quants.shape[2], -1).T
@@ -398,7 +383,6 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=True):
 
     @staticmethod
     def quantize(mat, mode="nf4"):
-        assert mode == "nf4"
         quants, scales = quantize_vmap(mat, mode)
         return QuantMatrix(
             quants=quants,
@@ -451,9 +435,17 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=True):
 
         return self.dequantize()
 
+    @property
+    def mode(self):
+        if self.quants.dtype == jnp.int8:
+            return "i8"
+        elif self.quants.dtype == jnp.int4:
+            return "nf4"
+
     def dequantize(self):
         return dequantize_vmap(self.quants, self.scales,
-                               use_approx=self.use_approx, orig_dtype=self.orig_dtype)
+                               use_approx=self.use_approx, orig_dtype=self.orig_dtype,
+                               mode=self.mode)
 
     # @partial(jax.jit, static_argnames=("mesh_and_axis"))
     def with_mesh_and_axis(self, mesh_and_axis):
@@ -608,27 +600,35 @@ def dot_general_handler(
     return out.reshape(*orig_a_shape[:-1], out.shape[-1]).astype(og_dtype)
 
 
-def quantize_groups(group, codebook):
+def quantize_groups(group, codebook, mode="nf4"):
+    group = group.astype(jnp.float32)
+    
     scale = jnp.max(jnp.abs(group))
     scaled = group / scale
 
-    errors = scaled[..., None] - codebook
-    code_vals = jnp.argmin(jnp.abs(errors), axis=-1)
+    if mode == "nf4":
+        errors = scaled[..., None] - codebook
+        quants = jnp.argmin(jnp.abs(errors), axis=-1)
+    elif mode == "i8":
+        scaled = scaled * 127.5
+        quants = jnp.clip(scaled.round(), -128, 127).astype(jnp.int8)
+    
+    return quants, scale
 
-    return code_vals, scale
-
-@partial(jax.jit, static_argnames=("use_approx", "group_size", "mesh_and_axis", "quantize_groups", "codebook"))
-def quantize_matrix(mat, use_approx, group_size=32, mesh_and_axis=None, quantize_groups=quantize_groups, codebook=approx_nf4):
+@partial(jax.jit, static_argnames=("use_approx", "group_size", "mesh_and_axis", "quantize_groups", "codebook", "mode"))
+def quantize_matrix(mat, use_approx, group_size=32, mesh_and_axis=None, quantize_groups=quantize_groups, codebook=approx_nf4, mode="nf4"):
     transposed = mat.T
     grouped = transposed.reshape(-1, group_size)
 
-    quants, scales = jax.vmap(quantize_groups, in_axes=(0, None))(grouped, codebook)
+    quants, scales = jax.vmap(partial(quantize_groups, mode=mode), in_axes=(0, None))(grouped, codebook)
 
     # int4 does not support reshape/transpose on CPU
     quants = quants.reshape(mat.shape[-1], -1, group_size)
     quants = quants.transpose(1, 2, 0)
-    quants = u4toi4(quants)
-    quants = quants.astype(jnp.int4)
+
+    if mode == "nf4":
+        quants = u4toi4(quants)
+        quants = quants.astype(jnp.int4)
 
     scales = scales.reshape(mat.shape[-1], -1, 1)
     scales = scales.transpose(1, 2, 0)
@@ -649,14 +649,8 @@ def quantize_vmap(mat, mode, group_size=32, mesh_and_axis=None):
         return jax.vmap(
             partial(quantize_vmap, mode=mode, group_size=group_size, mesh_and_axis=mesh_and_axis)
         )(mat)
-    if mode == "nf4":
-        mat = quantize_matrix(mat, use_approx=True, group_size=group_size, mesh_and_axis=mesh_and_axis)
-        return mat.quants, mat.scales
-    elif mode == "i8":
-        raise NotImplementedError
-        # return quantize_matrix(mat, use_approx=False, group_size=group_size, mesh_and_axis=mesh_and_axis)
-    else:
-        raise ValueError(f"Invalid mode: {mode}")
+    mat = quantize_matrix(mat, use_approx=True, group_size=group_size, mesh_and_axis=mesh_and_axis, mode=mode)
+    return mat.quants, mat.scales
 
 def time_mfu(number=100, blocks=None, verbose=False):
     import timeit
@@ -704,104 +698,104 @@ def check_accuracy(inputs, matrix, quant_matrix):
     return result_
 
 if __name__ == "__main__":
-    with jax.default_device(jax.devices("cpu")[0]):
-        a, b, c = 512, 512, 512
+    # with jax.default_device(jax.devices("cpu")[0]):
+    #     a, b, c = 512, 512, 512
 
-        inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
-        matrix = jax.random.normal(jax.random.key(1), (b, c), dtype=jnp.bfloat16)
+    #     inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
+    #     matrix = jax.random.normal(jax.random.key(1), (b, c), dtype=jnp.bfloat16)
 
-        quant_matrix = {"a": [quantize_matrix(matrix, use_approx=True)], "b": [quantize_matrix(matrix, use_approx=False)]}
+    #     quant_matrix = {"a": [quantize_matrix(matrix, use_approx=True)], "b": [quantize_matrix(matrix, use_approx=False)]}
 
-        vals, treedef = jax.tree.flatten(
-            quant_matrix, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
-        )
-        treedef = jax.tree.unflatten(treedef, [jnp.zeros((1,)) for x in vals])
-        new_vals = []
-        shardify = lambda val: jax.device_put(val, jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0]))
-        for val in vals:
-            if isinstance(val, QuantMatrix):
-                quants, scales = shardify((val.quants, val.scales))
-                new_vals.append(("qm", quants, scales, val.use_approx, str(val.orig_dtype), val.use_kernel, val.mesh_and_axis))
-            else:
-                new_vals.append(shardify(val))
-        vals = new_vals
+    #     vals, treedef = jax.tree.flatten(
+    #         quant_matrix, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
+    #     )
+    #     treedef = jax.tree.unflatten(treedef, [jnp.zeros((1,)) for x in vals])
+    #     new_vals = []
+    #     shardify = lambda val: jax.device_put(val, jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0]))
+    #     for val in vals:
+    #         if isinstance(val, QuantMatrix):
+    #             quants, scales = shardify((val.quants, val.scales))
+    #             new_vals.append(("qm", quants, scales, val.use_approx, str(val.orig_dtype), val.use_kernel, val.mesh_and_axis))
+    #         else:
+    #             new_vals.append(shardify(val))
+    #     vals = new_vals
 
-        checkpointer = ocp.PyTreeCheckpointer()
-        path = ocp.test_utils.erase_and_create_empty("somewhere/test")
-        path = path.resolve()
-        checkpointer.save(path / "struc", treedef)
-        checkpointer.save(path / "aa", vals)
+    #     checkpointer = ocp.PyTreeCheckpointer()
+    #     path = ocp.test_utils.erase_and_create_empty("somewhere/test")
+    #     path = path.resolve()
+    #     checkpointer.save(path / "struc", treedef)
+    #     checkpointer.save(path / "aa", vals)
         
-        checkpointer = ocp.PyTreeCheckpointer()
-        treedef_meta = checkpointer.metadata(path / "struc")
-        sharding = jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0])
-        restore_args = ocp.checkpoint_utils.construct_restore_args(
-            treedef_meta,
-            sharding_tree=jax.tree.map(lambda _: sharding, treedef_meta)
-        )
-        restored_treedef = checkpointer.restore(path / "struc",
-                                                restore_args=restore_args)
-        vals_meta = checkpointer.metadata(path / "aa")
-        sharding = jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0])
-        restore_args = ocp.checkpoint_utils.construct_restore_args(
-            vals_meta,
-            sharding_tree=jax.tree.map(lambda _: sharding, vals_meta)
-        )
-        restored_vals = checkpointer.restore(path / "aa",
-                                                restore_args=restore_args)
+    #     checkpointer = ocp.PyTreeCheckpointer()
+    #     treedef_meta = checkpointer.metadata(path / "struc")
+    #     sharding = jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0])
+    #     restore_args = ocp.checkpoint_utils.construct_restore_args(
+    #         treedef_meta,
+    #         sharding_tree=jax.tree.map(lambda _: sharding, treedef_meta)
+    #     )
+    #     restored_treedef = checkpointer.restore(path / "struc",
+    #                                             restore_args=restore_args)
+    #     vals_meta = checkpointer.metadata(path / "aa")
+    #     sharding = jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0])
+    #     restore_args = ocp.checkpoint_utils.construct_restore_args(
+    #         vals_meta,
+    #         sharding_tree=jax.tree.map(lambda _: sharding, vals_meta)
+    #     )
+    #     restored_vals = checkpointer.restore(path / "aa",
+    #                                             restore_args=restore_args)
         
-        _, restored_treedef = jax.tree_flatten(
-            restored_treedef, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
-        )
-        new_vals = []
-        for val in restored_vals:
-            if isinstance(val, list) and val[0] == "qm":
-                quants, scales, use_approx, orig_dtype, use_kernel, mesh_and_axis = val[1:]
-                new_vals.append(QuantMatrix(
-                    quants=quants, scales=scales,
-                    use_approx=use_approx, orig_dtype=orig_dtype,
-                    use_kernel=use_kernel, mesh_and_axis=mesh_and_axis))
-            else:
-                new_vals.append(val)
-        restored_quant_matrix = jax.tree_unflatten(restored_treedef, new_vals)
-        print(jax.tree.map(lambda a, b: (a == b).all(), restored_quant_matrix, quant_matrix))
-    exit()
+    #     _, restored_treedef = jax.tree_flatten(
+    #         restored_treedef, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
+    #     )
+    #     new_vals = []
+    #     for val in restored_vals:
+    #         if isinstance(val, list) and val[0] == "qm":
+    #             quants, scales, use_approx, orig_dtype, use_kernel, mesh_and_axis = val[1:]
+    #             new_vals.append(QuantMatrix(
+    #                 quants=quants, scales=scales,
+    #                 use_approx=use_approx, orig_dtype=orig_dtype,
+    #                 use_kernel=use_kernel, mesh_and_axis=mesh_and_axis))
+    #         else:
+    #             new_vals.append(val)
+    #     restored_quant_matrix = jax.tree_unflatten(restored_treedef, new_vals)
+    #     print(jax.tree.map(lambda a, b: (a == b).all(), restored_quant_matrix, quant_matrix))
+    # exit()
     
-    shard_axis = None
-    mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, -1, 1), ("dp", "fsdp", "tp"))
-    quant_matrix = quant_matrix.with_mesh_and_axis((mesh, shard_axis))
-    input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", None))
-    inputs_device = jax.device_put(inputs.reshape(-1, 64, inputs.shape[-1]), input_sharding)
+    # shard_axis = None
+    # mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, -1, 1), ("dp", "fsdp", "tp"))
+    # quant_matrix = quant_matrix.with_mesh_and_axis((mesh, shard_axis))
+    # input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", None))
+    # inputs_device = jax.device_put(inputs.reshape(-1, 64, inputs.shape[-1]), input_sharding)
 
-    inputs_device = jax.block_until_ready(inputs_device)
-    quant_matrix = jax.block_until_ready(quant_matrix)
-    super_quant = quant_matrix.stack(quant_matrix)
+    # inputs_device = jax.block_until_ready(inputs_device)
+    # quant_matrix = jax.block_until_ready(quant_matrix)
+    # super_quant = quant_matrix.stack(quant_matrix)
     
-    @jax.jit
-    @qax.use_implicit_args
-    def h(a, b):
-        return a @ b
-    print(inputs_device.shape, quant_matrix.shape, h(inputs_device, quant_matrix).shape)
-    print(super_quant.shape)
-    jax.debug.inspect_array_sharding(super_quant.quants, callback=print)
+    # @jax.jit
+    # @qax.use_implicit_args
+    # def h(a, b):
+    #     return a @ b
+    # print(inputs_device.shape, quant_matrix.shape, h(inputs_device, quant_matrix).shape)
+    # print(super_quant.shape)
+    # jax.debug.inspect_array_sharding(super_quant.quants, callback=print)
 
-    @jax.jit
-    def g(x):
-        return jnp.mean(jnp.abs(x))
+    # @jax.jit
+    # def g(x):
+    #     return jnp.mean(jnp.abs(x))
 
-    @jax.jit
-    @qax.use_implicit_args
-    def f(a, b):
-        def inner(a, b):
-            print(a.shape, b.shape, (a @ b).shape)
-            return a @ b, None
-        print(b)
-        y = jax.lax.scan(inner, a, b,)[0]
-        return jnp.mean(jnp.abs(y))
-    print(f(inputs_device, super_quant))
-    print(g(h(h(inputs_device, quant_matrix), quant_matrix)))
+    # @jax.jit
+    # @qax.use_implicit_args
+    # def f(a, b):
+    #     def inner(a, b):
+    #         print(a.shape, b.shape, (a @ b).shape)
+    #         return a @ b, None
+    #     print(b)
+    #     y = jax.lax.scan(inner, a, b,)[0]
+    #     return jnp.mean(jnp.abs(y))
+    # print(f(inputs_device, super_quant))
+    # print(g(h(h(inputs_device, quant_matrix), quant_matrix)))
 
-    exit()
+    # exit()
 
     # x = jnp.arange(16, dtype=jnp.int32)
     # print(nf4[x].tolist())
@@ -816,7 +810,7 @@ if __name__ == "__main__":
         inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
         matrix = jax.random.normal(jax.random.key(1), (b, c), dtype=jnp.bfloat16)
 
-    quant_matrix = quantize_matrix(matrix, use_approx=True)
+    quant_matrix = QuantMatrix.quantize(matrix, mode="i8")
     result = check_accuracy(inputs, matrix, quant_matrix)
     shard_axis = 0
     for shard_axis in (None, 0, 1):

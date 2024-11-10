@@ -431,7 +431,7 @@ def preprocess_official(flux, model):
             continue
         if "mod" in key:
             continue
-        x = QuantMatrix.quantize(x)
+        x = QuantMatrix.quantize(x, mode="i8")
         array_flux[key] = x
     flux = array_flux
 

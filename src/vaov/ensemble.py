@@ -11,14 +11,15 @@ from loguru import logger
 class FluxEnsemble:
     def __init__(self):
         self.mesh = jax.sharding.Mesh(
-            np.array(jax.devices("tpu")).reshape(-1, jax.local_device_count(), 1), ("dp", "fsdp", "tp")
+            # np.array(jax.devices("tpu")).reshape(-1, jax.local_device_count(), 1), ("dp", "fsdp", "tp")
+            np.array(jax.devices("tpu")).reshape(jax.local_device_count(), -1, 1), ("dp", "fsdp", "tp")
         )
         self.clip = CLIPInterface(self.mesh)
         self.t5 = T5EncoderInferencer(self.mesh)
         self.flux = DiFormerInferencer(self.mesh)
 
     def sample(self, text: str, width: int = 512, height: int = 512, batch_size: int = 4,
-               sample_steps: int = 200):
+               sample_steps: int = 50):
         logger.info("Sampling image for text: {}", text)
         texts = [text] * batch_size
         logger.info("Encoding text using CLIP")
