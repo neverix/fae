@@ -379,9 +379,11 @@ class SelfAttention(eqx.Module):
         q, k = self.qk_norm(q, k, v)
         return q, k, v
 
-    def __call__(self, x, pe, mask=None):
+    def __call__(self, x, pe, mask=None, no_out=False):
         q, k, v = self.qkv(x)
         attn = attention(q, k, v, pe=pe, mask=mask)
+        if no_out:
+            return attn
         return self.o_proj(attn)
 
 class MLP(eqx.Module):
@@ -403,9 +405,11 @@ class MLP(eqx.Module):
             use_bias=True
         )
     
-    def __call__(self, x):
+    def __call__(self, x, no_out=False):
         mlp = self.in_proj(x)
         mlp = jax.nn.gelu(mlp, approximate=True)
+        if no_out:
+            return mlp
         return self.out_proj(mlp)
 
 
@@ -434,33 +438,67 @@ class DoubleStreamBlock(eqx.Module):
             MLP(config, key=k) for k in jax.random.split(key, 2)
         )
 
-    def __call__(self, data, vec, pe, mask=None):
+    def __call__(self, data, vec, pe, mask=None, debug_first=False):
         img, txt = data["img"], data["txt"]
         txt_len = txt.shape[-2]
 
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
-
+        
+        if debug_first:
+            sow_debug(dict(
+                img_mod1_shift=img_mod1.shift, img_mod1_scale=img_mod1.scale, img_mod1_gate=img_mod1.gate,
+                img_mod2_shift=img_mod2.shift, img_mod2_scale=img_mod2.scale, img_mod2_gate=img_mod2.gate,
+                txt_mod1_shift=txt_mod1.shift, txt_mod1_scale=txt_mod1.scale, txt_mod1_gate=txt_mod1.gate,
+                txt_mod2_shift=txt_mod2.shift, txt_mod2_scale=txt_mod2.scale, txt_mod2_gate=txt_mod2.gate,
+            ), "first_double_modulations")
+        
         img_normed = self.img_norm1(img)
         img_modulated = img_mod1(img_normed)
+        if debug_first:
+            sow_debug(
+                dict(img_normed=img_normed, img_modulated=img_modulated), "first_double_img_mod"
+            )
         img_q, img_k, img_v = self.img_attn.qkv(img_modulated)
+        if debug_first:
+            sow_debug(
+                dict(img_q=img_q, img_k=img_k, img_v=img_v), "first_double_img_qkv"
+            )
         
         txt_normed = self.txt_norm1(txt)
         txt_modulated = txt_mod1(txt_normed)
+        if debug_first:
+            sow_debug(
+                dict(txt_normed=txt_normed, txt_modulated=txt_modulated), "first_double_txt_mod"
+            )
         txt_q, txt_k, txt_v = self.txt_attn.qkv(txt_modulated)
+        if debug_first:
+            sow_debug(
+                dict(txt_q=txt_q, txt_k=txt_k, txt_v=txt_v), "first_double_txt_qkv"
+            )
         
         q = jnp.concatenate((txt_q, img_q), axis=-2)
         k = jnp.concatenate((txt_k, img_k), axis=-2)
         v = jnp.concatenate((txt_v, img_v), axis=-2)
         
         attn = attention(q, k, v, pe, mask=mask)
+        if debug_first:
+            sow_debug(dict(attn=attn), "first_double_attn")
         txt_attn, img_attn = attn[..., :txt_len, :], attn[..., txt_len:, :]
 
         img = img + img_mod1.gate * self.img_attn.o_proj(img_attn)
+        if debug_first:
+            sow_debug(dict(img=img), "first_double_img_gated")
         img = img + img_mod2.gate * self.img_mlp(img_mod2(self.img_norm2(img)))
+        if debug_first:
+            sow_debug(dict(img=img), "first_double_img_mlp_gated")
     
         txt = txt + txt_mod1.gate * self.txt_attn.o_proj(txt_attn)
+        if debug_first:
+            sow_debug(dict(txt=txt), "first_double_txt_gated")
         txt = txt + txt_mod2.gate * self.txt_mlp(txt_mod2(self.txt_norm2(txt)))
+        if debug_first:
+            sow_debug(dict(txt=txt), "first_double_txt_mlp_gated")
         
         return dict(img=img, txt=txt)
 
@@ -658,7 +696,13 @@ class DiFormer(eqx.Module):
         mask = jnp.concatenate((txt_mask, img_mask), -1)
         data = dict(img=img, txt=txt)
         sow_debug(dict(img=img, txt=txt, vec=vec, pe=pe, mask=mask), "pre_double")
-
+        
+        # is not actually called if we don't reap
+        first_double = self.double_blocks.call_first(
+            data, vec=vec, pe=pe, mask=mask, debug_first=True
+        )
+        sow_debug(first_double, "first_double")
+        
         data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
 
         txt, img = data["txt"], data["img"]
