@@ -311,15 +311,16 @@ def main():
     pred_noise = result.noise[0, :1]
     noise = image_inputs.noise[0, :1]
     print(
-        jnp.mean(jnp.abs(noise)),
-        jnp.mean(jnp.abs(pred_noise)),
-        jnp.mean(jnp.abs(noise - pred_noise)),
+        jnp.mean(jnp.square(noise)),
+        jnp.mean(jnp.square(pred_noise)),
+        jnp.mean(jnp.square(noise - pred_noise)),
     )
     print(jnp.mean(jnp.square(result.prediction - result.ground_truth)))
     print(
         jnp.mean(
             jnp.square(
-                jax.random.normal(jax.random.key(0), result.prediction.shape)
+                # jax.random.normal(jax.random.key(0), result.prediction.shape)
+                (-image_inputs.encoded)
                 - result.ground_truth
             )
         )

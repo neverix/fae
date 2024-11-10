@@ -168,6 +168,7 @@ class DiFormer(eqx.Module):
         sow_debug(dict(vec=vec), "guidance_vec")
         vec = vec + self.vector_in(y)
         sow_debug(dict(vec=vec), "vec")
+        vec = vec.astype(jnp.bfloat16)
 
         txt = self.txt_in(txt)
         
@@ -196,6 +197,12 @@ class DiFormer(eqx.Module):
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
         sow_debug(dict(data=data), "pre_single")
+        
+        first_single = self.single_blocks.call_first(
+            data, vec=vec, pe=pe, mask=mask, debug_first=True
+        )
+        sow_debug(first_single, "first_single")
+        
         data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
         img = data[..., txt.shape[-2]:, :]
 
@@ -436,10 +443,11 @@ def preprocess_official(flux, model):
             og_shape = og_tensor.shape
             og_dtype = og_tensor.dtype
         x = x.astype(jnp.bfloat16)
-        if ("single_blocks" not in key and "double_blocks" not in key) or "mod" in key:
+        if "mod" in key or any(s in key for s in
+                               ("vector_in", "guidance_in")):
             array_flux[key] = x
             continue
-        x = QuantMatrix.quantize(x, mode="i8", group_size=8)
+        x = QuantMatrix.quantize(x, mode="i8", group_size=32)
         array_flux[key] = x
     flux = array_flux
 
@@ -494,8 +502,8 @@ def load_flux(
     path=None,
     # path="somewhere/flux.st",
     hf_path=("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
-    # preprocess_into="somewhere/flux_prep",
-    preprocess_into=None,
+    preprocess_into="somewhere/flux_prep",
+    # preprocess_into=None,
 ):
     logger.info(f"Loading flux from {path or hf_path}")
     preprocess_into = Path(preprocess_into).resolve() if preprocess_into else None

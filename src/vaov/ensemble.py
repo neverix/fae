@@ -6,29 +6,34 @@ from PIL import Image
 from .clip import CLIPInterface
 from .t5 import T5EncoderInferencer
 from .flux_inferencer import DiFormerInferencer
+from jax.experimental import mesh_utils
 from loguru import logger
 
 class FluxEnsemble:
     def __init__(self):
-        self.mesh = jax.sharding.Mesh(
-            # np.array(jax.devices("tpu")).reshape(-1, jax.local_device_count(), 1), ("dp", "fsdp", "tp")
-            np.array(jax.devices("tpu")).reshape(jax.local_device_count(), -1, 1), ("dp", "fsdp", "tp")
-        )
-        self.clip = CLIPInterface(self.mesh)
-        self.t5 = T5EncoderInferencer(self.mesh)
+        logger.info("Creating mesh")
+        local_device_count = jax.local_device_count()
+        shape_request = (-1, local_device_count, 1)
+        device_count = jax.device_count()
+        mesh_shape = np.arange(device_count).reshape(*shape_request).shape
+        physical_mesh = mesh_utils.create_device_mesh(mesh_shape)
+        self.mesh = jax.sharding.Mesh(physical_mesh, ("dp", "fsdp", "tp"))
+        
+        # self.clip = CLIPInterface(self.mesh)
+        # self.t5 = T5EncoderInferencer(self.mesh)
         self.flux = DiFormerInferencer(self.mesh)
 
     def sample(self, text: str, width: int = 512, height: int = 512, batch_size: int = 4,
-               sample_steps: int = 50):
+               sample_steps: int = 20):
         logger.info("Sampling image for text: {}", text)
         texts = [text] * batch_size
-        logger.info("Encoding text using CLIP")
-        clip_outputs = self.clip(texts)
-        logger.info("Encoding text using T5")
-        t5_outputs = self.t5(texts)
-        text_input = jax.block_until_ready(self.flux.text_input(
-            clip_emb=clip_outputs, t5_emb=t5_outputs, t5_already_sharded=True, clip_already_sharded=True
-        ))
+        # logger.info("Encoding text using CLIP")
+        # clip_outputs = self.clip(texts)
+        # logger.info("Encoding text using T5")
+        # t5_outputs = self.t5(texts)
+        # text_input = jax.block_until_ready(self.flux.text_input(
+        #     clip_emb=clip_outputs, t5_emb=t5_outputs, t5_already_sharded=True, clip_already_sharded=True
+        # ))
         logger.warning("using something else anyway for debugging")
         import torch
         torch.set_grad_enabled(False)
@@ -37,7 +42,9 @@ class FluxEnsemble:
         text_input = self.flux.text_input(t5_emb.repeat(batch_size, 1, 1), clip_emb.repeat(batch_size, 1))
         logger.info("Preparing image input")
         prototype = Image.new("RGB", (width, height), (127, 127, 127))
-        image_input = self.flux.image_input([prototype] * batch_size, timesteps=1)
+        image_input = self.flux.image_input([prototype] * batch_size,
+                                            timesteps=1, guidance_scale=4.0,
+                                            key=jax.random.key(5))
         logger.info("Sampling image")
         def sample_step(_, image_input):
             return self.flux(text_input, image_input).next_input(1 / sample_steps)

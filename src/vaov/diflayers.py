@@ -573,9 +573,6 @@ class DoubleStreamBlock(eqx.Module):
 
         img = fr(img)
         txt = fr(txt)
-        # jax.debug.print(
-        #     "max double txt {} img {}", jnp.abs(txt).max(), jnp.abs(img).max()
-        # )
 
         return dict(img=img, txt=txt)
 
@@ -608,15 +605,29 @@ class SingleStreamBlock(eqx.Module):
 
         self.modulation = Modulation(config.hidden_size, double=False, key=key)
 
-    def __call__(self, data, vec, pe, mask=None):
+    def __call__(self, data, vec, pe, mask=None, debug_first=False):
         mod, _ = self.modulation(vec)
         x = self.pre_norm(data)
         x = mod(x)
+        if debug_first:
+            sow_debug(dict(x=x), "first_single_norm")
 
+        attn_pre = self.attn(x, pe, mask=mask, no_out=True)
         attn_out = self.attn(x, pe, mask=mask)
+        if debug_first:
+            sow_debug(
+                dict(attn_pre=attn_pre, attn_out=attn_out), "first_single_attn_pre"
+            )
+        mlp_pre = self.mlp(x, no_out=True)
         mlp_out = self.mlp(x)
+        if debug_first:
+            sow_debug(dict(mlp_pre=mlp_pre, mlp_out=mlp_out), "first_single_mlp_pre")
 
-        par_out = mod.gate * (attn_out + mlp_out)
-        out = x + fg(par_out)
+        par_out = attn_out + mlp_out
+        if debug_first:
+            sow_debug(dict(out=par_out, gate=mod.gate), "first_single_pre_out")
+        out = x + fg(mod.gate * par_out)
+        if debug_first:
+            sow_debug(dict(out=out), "first_single_out")
         out = fr(out)
         return out
