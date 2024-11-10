@@ -427,11 +427,11 @@ def preprocess_official(flux, model):
                 raise AttributeError(f"{key} is not initialized")
             og_shape = og_tensor.shape
             og_dtype = og_tensor.dtype
-        if "single_blocks" not in key and "double_blocks" not in key:
+        if ("single_blocks" not in key and "double_blocks" not in key) or "mod" in key:
+            x = x.astype(jnp.bfloat16)
+            array_flux[key] = x
             continue
-        if "mod" in key:
-            continue
-        # x = QuantMatrix.quantize(x, mode="i8")
+        x = QuantMatrix.quantize(x, mode="i8")
         array_flux[key] = x
     flux = array_flux
 
