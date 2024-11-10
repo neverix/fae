@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 from .clip import CLIPInterface
 from .t5 import T5EncoderInferencer
-from .diformer import DiFormerInferencer
+from .flux_inferencer import DiFormerInferencer
 from loguru import logger
 
 class FluxEnsemble:

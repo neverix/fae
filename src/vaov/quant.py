@@ -396,6 +396,19 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=True):
 
     mesh_and_axis: Optional[Tuple[jax.sharding.Mesh, Optional[int]]] = qax.aux_field()
 
+    @staticmethod
+    def quantize(mat, mode="nf4"):
+        assert mode == "nf4"
+        quants, scales = quantize_vmap(mat, mode)
+        return QuantMatrix(
+            quants=quants,
+            scales=scales,
+            use_approx=True,
+            orig_dtype=mat.dtype,
+            use_kernel=True,
+            mesh_and_axis=None,
+        )
+
     def __post_init__(self):
         self.dtype = self.compute_dtype()
         self.shape = self.compute_shape()
@@ -604,12 +617,11 @@ def quantize_groups(group, codebook):
 
     return code_vals, scale
 
-@partial(jax.jit, static_argnames=("use_approx", "group_size", "mesh_and_axis"))
-def quantize_matrix(mat, use_approx, group_size=32, mesh_and_axis=None):
+@partial(jax.jit, static_argnames=("use_approx", "group_size", "mesh_and_axis", "quantize_groups", "codebook"))
+def quantize_matrix(mat, use_approx, group_size=32, mesh_and_axis=None, quantize_groups=quantize_groups, codebook=approx_nf4):
     transposed = mat.T
     grouped = transposed.reshape(-1, group_size)
 
-    codebook = approx_nf4 if use_approx else nf4
     quants, scales = jax.vmap(quantize_groups, in_axes=(0, None))(grouped, codebook)
 
     # int4 does not support reshape/transpose on CPU
@@ -629,6 +641,22 @@ def quantize_matrix(mat, use_approx, group_size=32, mesh_and_axis=None):
         use_kernel=True,
         mesh_and_axis=mesh_and_axis,
     )
+
+
+@partial(jax.jit, static_argnames=("mode", "group_size", "mesh_and_axis"))
+def quantize_vmap(mat, mode, group_size=32, mesh_and_axis=None):
+    if mat.ndim > 2:
+        return jax.vmap(
+            partial(quantize_vmap, mode=mode, group_size=group_size, mesh_and_axis=mesh_and_axis)
+        )(mat)
+    if mode == "nf4":
+        mat = quantize_matrix(mat, use_approx=True, group_size=group_size, mesh_and_axis=mesh_and_axis)
+        return mat.quants, mat.scales
+    elif mode == "i8":
+        raise NotImplementedError
+        # return quantize_matrix(mat, use_approx=False, group_size=group_size, mesh_and_axis=mesh_and_axis)
+    else:
+        raise ValueError(f"Invalid mode: {mode}")
 
 def time_mfu(number=100, blocks=None, verbose=False):
     import timeit

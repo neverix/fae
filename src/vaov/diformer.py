@@ -219,6 +219,7 @@ def selector_fn(name):
     return selector
 
 
+@partial(jax.jit, static_argnames=("axis", "start", "size"))
 def weight_slice(arr, *, axis: int, start: int, size: int):
     if isinstance(arr, QuantMatrix):
         return arr.slice(axis=axis, start=start, size=size)
@@ -426,12 +427,16 @@ def preprocess_official(flux, model):
                 raise AttributeError(f"{key} is not initialized")
             og_shape = og_tensor.shape
             og_dtype = og_tensor.dtype
-        
+        if "single_blocks" not in key and "double_blocks" not in key:
+            continue
+        if "mod" in key:
+            continue
+        x = QuantMatrix.quantize(x)
         array_flux[key] = x
     flux = array_flux
 
-    logger.info("Splitting linear1/linear2")
     flux = {k.replace("norm.scale", "norm.weight"): v for k, v in flux.items()}
+    logger.info("Splitting linear1")
     linear1 = flux.pop("single_blocks.linear1.weight")
     qkv, mlp = (
         weight_slice(linear1, axis=-1, start=0, size=model.config.hidden_size * 3),
@@ -451,6 +456,7 @@ def preprocess_official(flux, model):
     )
     flux["single_blocks.attn.qkv_proj.bias"] = qkv
     flux["single_blocks.mlp.in_proj.bias"] = mlp
+    logger.info("Splitting linear2")
     linear2 = flux.pop("single_blocks.linear2.weight")
     qkv, mlp = (
         weight_slice(linear2, axis=1, start=0, size=model.config.hidden_size),
@@ -471,6 +477,7 @@ def preprocess_official(flux, model):
         flux[key.replace("single_blocks.norm", "single_blocks.attn.qk_norm")] = (
             flux.pop(key)
         )
+    logger.info("Done preprocessing")
     return flux
 
 
@@ -479,8 +486,8 @@ def load_flux(
     path=None,
     # path="somewhere/flux.st",
     hf_path=("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
-    # preprocess_into="somewhere/flux_prep",
-    preprocess_into=None,
+    preprocess_into="somewhere/flux_prep",
+    # preprocess_into=None,
 ):
     logger.info(f"Loading flux from {path}")
     preprocess_into = Path(preprocess_into).resolve() if preprocess_into else None
@@ -496,6 +503,8 @@ def load_flux(
         if preprocess_into is not None:
             logger.info("Saving preprocessed flux")
             save_thing(flux, preprocess_into)
+        else:
+            logger.info("Skipping save")
     else:
         logger.info("Loading preprocessed flux")
         flux = load_thing(preprocess_into)

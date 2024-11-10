@@ -441,12 +441,12 @@ class MLP(eqx.Module):
 
 def fg(x):
     """Fix gated addition."""
-    return jnp.clip(x, -1024, 1024)
+    return jnp.clip(x, -32768, 32768)
 
 
 def fr(x):
     """Fix residual."""
-    return jnp.clip(x, -1024, 1024)
+    return jnp.clip(x, -32768, 32768)
 
 
 def sow_debug(val, name, **kwargs):
