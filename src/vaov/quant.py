@@ -35,48 +35,51 @@ nf4 = jnp.asarray(
     ]
 )
 
+
+BIG_POLYNOMIAL = True
 def nf4xf32_to_f32(x):
     x = x.astype(jnp.float32)
-    # return (
-    #     x
-    #     * (
-    #         x
-    #         * (
-    #             x
-    #             * (
-    #                 x
-    #                 * (
-    #                     x
-    #                     * (
-    #                         x
-    #                         * (
-    #                             x
-    #                             * (
-    #                                 x
-    #                                 * (
-    #                                     x
-    #                                     * (
-    #                                         6.88674345241901e-8
-    #                                         - 8.47182255893858e-10 * x
-    #                                     )
-    #                                     - 2.38380978507793e-6
-    #                                 )
-    #                                 + 4.62161872192984e-5
-    #                             )
-    #                             - 0.000555886625699011
-    #                         )
-    #                         + 0.00435485724102389
-    #                     )
-    #                     - 0.0228024324616347
-    #                 )
-    #                 + 0.0811200908594962
-    #             )
-    #             - 0.200455927752031
-    #         )
-    #         + 0.441938722753289
-    #     )
-    #     - 0.999980040956333
-    # )
+    if BIG_POLYNOMIAL:
+        return (
+            x
+            * (
+                x
+                * (
+                    x
+                    * (
+                        x
+                        * (
+                            x
+                            * (
+                                x
+                                * (
+                                    x
+                                    * (
+                                        x
+                                        * (
+                                            x
+                                            * (
+                                                6.88674345241901e-8
+                                                - 8.47182255893858e-10 * x
+                                            )
+                                            - 2.38380978507793e-6
+                                        )
+                                        + 4.62161872192984e-5
+                                    )
+                                    - 0.000555886625699011
+                                )
+                                + 0.00435485724102389
+                            )
+                            - 0.0228024324616347
+                        )
+                        + 0.0811200908594962
+                    )
+                    - 0.200455927752031
+                )
+                + 0.441938722753289
+            )
+            - 0.999980040956333
+        )
     return (
         x
         * (
@@ -142,9 +145,7 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
     weight_transpose = backward
 
     inputs = inputs.astype(jnp.bfloat16)
-    tensors = [
-        t if t.dtype.kind not in ("V", "f") else t.astype(jnp.bfloat16) for t in tensors
-    ]
+    # tensors = [t if t.dtype.kind not in ("V", "f") else t.astype(jnp.bfloat16) for t in tensors]
     # tensors = [t.view(jnp.int8) if t.dtype == jnp.uint8 else t for t in tensors]
 
     if blocks is None:
@@ -273,7 +274,6 @@ def matmul_nf4_kernel(
     def _():
         accum_ref[...] = jnp.zeros_like(accum_ref)
 
-
     quants = quants_ref[...]
     scale = scale_ref[...]
 
@@ -282,6 +282,27 @@ def matmul_nf4_kernel(
     inputs = inputs_ref[...]
     accum_ref[...] += jnp.dot(inputs, w1.reshape(block_k, -1), preferred_element_type=jnp.float32)
     
+    @pl.when(pl.program_id(axis=2) == (pl.num_programs(axis=2) - 1))
+    def _():
+        outputs_ref[...] = accum_ref[...].astype(outputs_ref.dtype)
+
+
+def matmul_i8_kernel(
+    inputs_ref, quants_ref, scale_ref, outputs_ref, accum_ref, *, block_k
+):
+    @pl.when(pl.program_id(axis=2) == 0)
+    def _():
+        accum_ref[...] = jnp.zeros_like(accum_ref)
+
+    quants = quants_ref[...]
+    scale = scale_ref[...]
+
+    scaled = quants * scale.astype(jnp.float32)
+    inputs = inputs_ref[...]
+    accum_ref[...] += jnp.dot(
+        inputs, scaled.reshape(block_k, -1), preferred_element_type=jnp.float32
+    )
+
     @pl.when(pl.program_id(axis=2) == (pl.num_programs(axis=2) - 1))
     def _():
         outputs_ref[...] = accum_ref[...].astype(outputs_ref.dtype)

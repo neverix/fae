@@ -413,6 +413,15 @@ class MLP(eqx.Module):
         return self.out_proj(mlp)
 
 
+def fg(x):
+    """Fix gated addition."""
+    return jnp.clip(x, -1024, 1024)
+
+def fr(x):
+    """Fix residual."""
+    return jnp.clip(x, -1024, 1024)
+
+
 class DoubleStreamBlock(eqx.Module):
     """Main two-stream MMDiT block."""
 
@@ -486,20 +495,30 @@ class DoubleStreamBlock(eqx.Module):
             sow_debug(dict(attn=attn), "first_double_attn")
         txt_attn, img_attn = attn[..., :txt_len, :], attn[..., txt_len:, :]
 
-        img = img + img_mod1.gate * self.img_attn.o_proj(img_attn)
+        img_out1 = img_mod1.gate * self.img_attn.o_proj(img_attn)
+        img = img + fg(img_out1)
         if debug_first:
             sow_debug(dict(img=img), "first_double_img_gated")
-        img = img + img_mod2.gate * self.img_mlp(img_mod2(self.img_norm2(img)))
+        img_out2 = img_mod2.gate * self.img_mlp(img_mod2(self.img_norm2(img)))
+        img = img + fg(img_out2)
         if debug_first:
             sow_debug(dict(img=img), "first_double_img_mlp_gated")
     
-        txt = txt + txt_mod1.gate * self.txt_attn.o_proj(txt_attn)
+        txt_out1 = txt_mod1.gate * self.txt_attn.o_proj(txt_attn)
+        txt = txt + fg(txt_out1)
         if debug_first:
             sow_debug(dict(txt=txt), "first_double_txt_gated")
-        txt = txt + txt_mod2.gate * self.txt_mlp(txt_mod2(self.txt_norm2(txt)))
+        txt_out2 = txt_mod2.gate * self.txt_mlp(txt_mod2(self.txt_norm2(txt)))
+        txt = txt + fg(txt_out2)
         if debug_first:
             sow_debug(dict(txt=txt), "first_double_txt_mlp_gated")
         
+        img = fr(img)
+        txt = fr(txt)
+        jax.debug.print(
+            "max double txt {} img {}", jnp.abs(txt).max(), jnp.abs(img).max()
+        )
+
         return dict(img=img, txt=txt)
 
 
@@ -534,7 +553,9 @@ class SingleStreamBlock(eqx.Module):
         attn_out = self.attn(x, pe, mask=mask)
         mlp_out = self.mlp(x)
 
-        out = x + mod.gate * (attn_out + mlp_out)
+        par_out = mod.gate * (attn_out + mlp_out)
+        out = x + fg(par_out)
+        out = fr(out)
         return out
 
 
@@ -1058,9 +1079,10 @@ class ImageOutput(DotDict):
 @qax.use_implicit_args
 def run_model_(weights, logic, kwargs, debug_mode=False):
     model = eqx.combine(weights, logic)
+    results = call_and_reap(model, tag="debug")(**kwargs)
     if debug_mode:
-        return call_and_reap(model, tag="debug")(**kwargs)
-    return model(**kwargs)
+        return results
+    return results[0]
 
 class DiFormerInferencer:
     def __init__(self,
@@ -1118,6 +1140,8 @@ class DiFormerInferencer:
         reaped = None
         if debug_mode:
             patched, reaped = results
+        else:
+            patched = results
         return ImageOutput(
             previous_input=image_inputs,
             patched=patched,
