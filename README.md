@@ -3,6 +3,7 @@
 ## Setup
 ```
 uv sync
+mkdir -p somewhere
 uv run python -m src.vaov.ensemble
 ```
 

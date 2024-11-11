@@ -529,8 +529,16 @@ def load_flux(
     logger.info("Loading weights")
     for key, value in flux.items():
         def replace_fn(old):
-            assert old.shape == value.shape, f"{key}: {old.shape} != {value.shape}"
             v = value
+            if isinstance(v, dict):
+                v = QuantMatrix(
+                    **v,
+                    orig_dtype=jnp.bfloat16,
+                    use_approx=True,
+                    use_kernel=True,
+                    mesh_and_axis=None,
+                )
+            assert old.shape == v.shape, f"{key}: {old.shape} != {v.shape}"
             if not isinstance(v, QuantMatrix):
                 v = v.astype(old.dtype)
             return v

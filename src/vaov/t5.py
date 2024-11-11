@@ -63,6 +63,18 @@ class T5EncoderInferencer(object):
             save_thing(params, quantized_path)
         else:
             params = load_thing(quantized_path)
+            predicate = lambda x: isinstance(x, dict) and "quants" in x and "scales" in x
+            def quantify(param):
+                if predicate(param):
+                    return QuantMatrix(
+                        **param,
+                        orig_dtype=jnp.bfloat16,
+                        use_approx=True,
+                        use_kernel=True,
+                        mesh_and_axis=None,
+                    )
+                return param
+            params = jax.tree.map(quantify, params, is_leaf=lambda x: predicate(x) or isinstance(x, qax.primitives.ArrayValue))
         logger.info("Moving model to device")
         params = to_device_params_tree(params, mesh_and_axis=(mesh, None))
         
