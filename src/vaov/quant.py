@@ -141,7 +141,7 @@ def i4tou4(x):
 
 
 @partial(jax.jit, static_argnames=("kernel", "backward", "blocks"))
-def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):    
+def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
     weight_transpose = backward
 
     inputs = inputs.astype(jnp.bfloat16)
@@ -524,11 +524,14 @@ def dot_general_handler(
     compute_dtype = jnp.bfloat16  # just so there's no confusion
     a = a.astype(compute_dtype)
 
-    if b.mesh_and_axis is not None:
+    orig_a_shape = a.shape
+    if True:  # 🤡
+        dq = b.dequantize()
+        out = a @ dq
+    elif b.mesh_and_axis is not None:
         mesh, map_axis = b.mesh_and_axis
         tensors = b.quants, b.scales
         # Reshape a to be 3-D
-        orig_a_shape = a.shape
         # (dp, fsdp, tp)
         a = a.reshape(-1, a.shape[1], a.shape[-1])
         if map_axis in (0, 1):
@@ -594,7 +597,6 @@ def dot_general_handler(
             )(a, *tensors)
     else:
         # Reshape a to be 2-D
-        orig_a_shape = a.shape
         a = a.reshape(-1, b.shape[0])
         out = matmul_fast(a, b.quants, b.scales, kernel=matmul_nf4_kernel)
     return out.reshape(*orig_a_shape[:-1], out.shape[-1]).astype(og_dtype)

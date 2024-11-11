@@ -290,7 +290,8 @@ def main():
     t5_emb, clip_emb = text_encodings[:2]
 
     logger.info("Creating mesh")
-    shape_request = (1, -1, 1)
+    # shape_request = (1, -1, 1)
+    shape_request = (-1, 1, 1)
     device_count = jax.device_count()
     mesh_shape = np.arange(device_count).reshape(*shape_request).shape
     physical_mesh = mesh_utils.create_device_mesh(mesh_shape)
@@ -308,11 +309,11 @@ def main():
         t5_emb.repeat(batch_size, 1, 1), clip_emb.repeat(batch_size, 1)
     )
     logger.info("Warming up model")
-    result = inferencer(text_inputs, image_inputs)
+    result = jax.block_until_ready(inferencer(text_inputs, image_inputs))
     logger.info("Running model")
-    result = inferencer(text_inputs, image_inputs)
+    result = jax.block_until_ready(inferencer(text_inputs, image_inputs))
     logger.info("Running model for debug")
-    result = inferencer(text_inputs, image_inputs, debug_mode=True)
+    result = jax.block_until_ready(inferencer(text_inputs, image_inputs, debug_mode=True))
 
     logger.info("Comparing results")
     pred_noise = result.noise[0, :1]

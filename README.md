@@ -4,7 +4,7 @@
 ```
 uv sync
 mkdir -p somewhere
-uv run python -m src.vaov.ensemble
+uv run python -m src.vaov.server
 ```
 
 ## Credits
