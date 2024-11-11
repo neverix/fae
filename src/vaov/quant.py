@@ -36,7 +36,7 @@ nf4 = jnp.asarray(
 )
 
 
-BIG_POLYNOMIAL = True
+BIG_POLYNOMIAL = False
 def nf4xf32_to_f32(x):
     x = x.astype(jnp.float32)
     if BIG_POLYNOMIAL:

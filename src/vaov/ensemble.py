@@ -25,6 +25,9 @@ class FluxEnsemble:
 
     def sample(self, text: str, width: int = 512, height: int = 512, batch_size: int = 4,
                sample_steps: int = 20):
+        n_tokens = width * height / (16 * 16)
+        schedule = get_flux_schedule(n_tokens, sample_steps)
+        
         logger.info("Sampling image for text: {}", text)
         texts = [text] * batch_size
         logger.info("Encoding text using CLIP")
@@ -40,9 +43,11 @@ class FluxEnsemble:
                                             timesteps=1, guidance_scale=4.0,
                                             key=jax.random.key(5))
         logger.info("Sampling image")
-        def sample_step(_, image_input):
-            return self.flux(text_input, image_input).next_input(1 / sample_steps)
-        denoised = jax.block_until_ready(jax.lax.fori_loop(0, sample_steps, sample_step, image_input).noised)
+        def sample_step(image_input, timesteps):
+            more_noisy, less_noisy = timesteps
+            return self.flux(text_input, image_input).next_input(more_noisy - less_noisy), None
+        schedule = (schedule[:-1], schedule[1:])
+        denoised = jax.block_until_ready(jax.lax.scan(sample_step, image_input, schedule)[0].encoded)
         # ... step here to fully denoise the image
         logger.info("Decoding")
         vae = self.flux.vae
@@ -50,6 +55,27 @@ class FluxEnsemble:
         decoded = np.asarray(vae.decode(denoised))
         for i in range(denoised.shape[0]):
             yield vae.deprocess(decoded[i:i+1])
+
+
+def get_flux_schedule(n_seq: int, n_steps: int):
+    # https://github.com/black-forest-labs/flux/blob/478338d52759f92af9eeb92cc9eaa49582b20c78/src/flux/sampling.py#L78
+    schedule = jnp.linspace(1, 0, n_steps + 1)
+    mu = mu_estimator(n_seq)
+    timesteps = time_shift(mu, 1.0, schedule)
+    return timesteps
+
+
+def time_shift(mu: float, sigma: float, t: jnp.ndarray):
+    # that's (1 / t) - 1, not 1 / (t - 1)
+    return jnp.exp(mu) / (jnp.exp(mu) + ((1 / t) - 1) ** sigma)
+
+
+MAX_SEQ = 4096
+MIN_SEQ = 256
+MAX_SHIFT = 1.15
+MIN_SHIFT = 0.5
+def mu_estimator(n_seq: int):
+    return n_seq * (MAX_SHIFT - MIN_SHIFT) / (MAX_SEQ - MIN_SEQ) + MIN_SHIFT
 
 
 if __name__ == "__main__":
