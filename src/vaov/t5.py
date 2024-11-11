@@ -45,6 +45,10 @@ def to_device_params_tree(params, **kwargs):
         is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue),
     )
 
+@partial(jax.jit, static_argnums=(0,))
+def run_model(wrapped_model, params, ids):
+    return wrapped_model(params=params, input_ids=ids).last_hidden_state
+
 class T5EncoderInferencer(object):
     def __init__(self, mesh, model_name="nev/t5-v1_1-xxl-flax"):
         self.mesh = mesh
@@ -92,9 +96,7 @@ class T5EncoderInferencer(object):
 
     def __call__(self, texts):
         encoder_input = self.create_inputs(texts)
-        return jax.jit(
-            lambda params, ids: self.wrapped_model(params=params, input_ids=ids).last_hidden_state) \
-            (self.params, encoder_input)
+        return run_model(self.wrapped_model, self.params, encoder_input)
 
     def create_inputs(self, texts):
         encoder_inputs = []

@@ -23,13 +23,13 @@ class FluxEnsemble:
         self.t5 = T5EncoderInferencer(self.mesh)
         self.flux = DiFormerInferencer(self.mesh)
 
-    def sample(self, text: str, width: int = 512, height: int = 512, batch_size: int = 4,
+    def sample(self, texts: list[str], width: int = 512, height: int = 512,
                sample_steps: int = 20):
         n_tokens = width * height / (16 * 16)
         schedule = get_flux_schedule(n_tokens, sample_steps)
         
-        logger.info("Sampling image for text: {}", text)
-        texts = [text] * batch_size
+        logger.info("Sampling image for texts: {}", texts)
+        batch_size = len(texts)
         logger.info("Encoding text using CLIP")
         clip_outputs = self.clip(texts)
         logger.info("Encoding text using T5")

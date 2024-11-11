@@ -240,9 +240,11 @@ class DiFormerInferencer:
         )
 
     def image_input(self, images, timesteps=0, guidance_scale=3.5, key=None):
-        encoded = self.vae.encode(
-            jnp.concatenate([self.vae.preprocess(image) for image in images], 0)
-        )
+        # fixme: OOM otherwise
+        with jax.default_device(jax.devices("cpu")[0]):
+            encoded = self.vae.encode(
+                jnp.concatenate([self.vae.preprocess(image) for image in images], 0)
+            )
         encoded = encoded.astype(jnp.float32)
         if encoded.shape[-1] % 2:
             encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 0), (0, 1)))
