@@ -2,6 +2,8 @@ from typing import Optional, Tuple, Sequence, List
 import jax
 from dataclasses import dataclass
 import dataclasses
+import jax.experimental
+import jax.experimental.shard_map
 import jax.numpy as jnp
 import numpy as np
 from math import ceil
@@ -140,6 +142,7 @@ def i4tou4(x):
     return jnp.where(x < 0, 16 + x, x)
 
 
+BLOCK_OVERRIDE = None
 @partial(jax.jit, static_argnames=("kernel", "backward", "blocks"))
 def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
     weight_transpose = backward
@@ -150,7 +153,11 @@ def matmul_fast(inputs, *tensors, kernel, backward=False, blocks=None):
 
     if blocks is None:
         if not backward:
-            block_x, block_y, block_k = 2048, 512, 512 # 78%
+            if BLOCK_OVERRIDE is not None:
+                block_x, block_y, block_k = BLOCK_OVERRIDE
+            else:
+                # block_x, block_y, block_k = 2048, 512, 512  # 78%
+                block_x, block_y, block_k = 2048, 512, 256
         else:
             # block_x, block_y, block_k = 256, 1024, 256
             block_x, block_y, block_k = 256, 256, 512
@@ -527,13 +534,13 @@ def dot_general_handler(
     a = a.astype(compute_dtype)
 
     orig_a_shape = a.shape
-    if True:  # 🤡
-        # TODO handle FSDP
-        if b.mesh_and_axis is not None:
-            raise NotImplementedError
-        dq = b.dequantize()
-        out = a @ dq
-    elif b.mesh_and_axis is not None:
+    def matmul_fast(inputs, *tensors, kernel=None):
+        return (inputs @ dequantize_vmap(*tensors,
+                                        use_approx=b.use_approx,
+                                        orig_dtype=og_dtype,
+                                        mode="i8" if b.quants.dtype == jnp.int8 else "nf4")).astype(compute_dtype)
+    
+    if b.mesh_and_axis is not None:
         mesh, map_axis = b.mesh_and_axis
         tensors = b.quants, b.scales
         # Reshape a to be 3-D
@@ -557,14 +564,38 @@ def dot_general_handler(
                 out_specs=P("dp", "fsdp", "tp" if map_axis == 1 else None),
                 check_rep=False,  # No replication rule for pallas_call
             )(a, *tensors)
+        # map_axis == None
+        elif mesh.shape["fsdp"] == 1:
+            def matmul_inner(a, *tensors):
+                a = a.reshape(-1, a.shape[-1])
+                out = matmul_fast(a, *tensors, kernel=matmul_nf4_kernel)
+                return out
+            a = a.reshape(-1, a.shape[1], a.shape[-1])
+            out = jax.experimental.shard_map.shard_map(
+                matmul_inner,
+                mesh=mesh,
+                in_specs=(P("dp", "fsdp", None),)
+                + tuple(
+                    P(
+                        None,
+                        None,
+                        None,
+                    )
+                    for _ in tensors
+                ),
+                out_specs=P("dp", "fsdp", None),
+                check_rep=False,  # No replication rule for pallas_call
+            )(
+                a,
+                *tensors,
+            )
         else:
             # https://jax.readthedocs.io/en/latest/jep/14273-shard-map.html#a-realistic-transformer-example
             def matmul(inputs, *tensors):
                 axis_size = jax.lax.psum(1, axis_name="fsdp")
                 axis_index = jax.lax.axis_index(axis_name="fsdp")
                 
-                # outputs = matmul_fast(inputs, *tensors, kernel=matmul_nf4_kernel)
-                accum = jnp.zeros((inputs.shape[0], inputs.shape[1], b.shape[1]), dtype=inputs.dtype)
+                accum = jnp.zeros((inputs.shape[0], inputs.shape[1], b.shape[1]), dtype=compute_dtype)
                 def loop_body(i, args):
                     accum, inputs, tensors = args
                     partial_result = matmul_fast(inputs.reshape(-1, inputs.shape[-1]), *tensors, kernel=matmul_nf4_kernel)
@@ -660,6 +691,7 @@ def quantize_vmap(mat, mode, group_size=32, mesh_and_axis=None):
     return mat.quants, mat.scales
 
 def time_mfu(number=100, blocks=None, verbose=False):
+    global BLOCK_OVERRIDE
     import timeit
     if verbose:
         timeit.template = """
@@ -689,11 +721,13 @@ def inner(_it, _timer{init}):
         return inputs @ quant_matrix
     def computation():
         return computation_jit(inputs_device, quant_matrix).block_until_ready()
+    BLOCK_OVERRIDE = blocks
     result = computation()
     time_per_iter = timeit.timeit(computation, number=number,) / number
     max_flops = 275e12 * len(jax.devices("tpu"))
     flops_in_matmul = a * b * c * 2
     mfu = flops_in_matmul / (time_per_iter * max_flops)
+    BLOCK_OVERRIDE = None
     return result, mfu
 
 
@@ -705,6 +739,46 @@ def check_accuracy(inputs, matrix, quant_matrix):
     return result_
 
 if __name__ == "__main__":
+    a, b, c, bs = 32768, 2048, 8192, 64
+    # a, b, c, bs = 2048, 2048, 2048, 64
+    quants = jax.random.randint(jax.random.PRNGKey(0), (a // bs, bs, b), 0, 255, dtype=jnp.int8)
+    quants = quants.astype(jnp.int4)
+    scale = jax.random.normal(jax.random.PRNGKey(1), (a // bs, 1, b), dtype=jnp.bfloat16) / 255
+    inputs = jax.random.normal(jax.random.PRNGKey(2), (c, a), dtype=jnp.bfloat16)
+    outputs = matmul_fast(inputs, quants, scale, kernel=matmul_nf4_kernel)
+    inputs_device = inputs
+    quant_matrix = QuantMatrix(quants=quants, scales=scale,
+                               use_approx=True, orig_dtype=jnp.bfloat16, use_kernel=True,
+                               mesh_and_axis=None)
+    # outputs_ = inputs @ dequantize(quants, scale)
+    # print(jnp.mean(jnp.abs(outputs - outputs_)), jnp.mean(jnp.abs(outputs_)))
+    mfu = time_mfu(100, verbose=True)[1]
+    print(f"MFU: {mfu:.2f}")
+    options = [256, 512, 1024, 2048]
+    import random
+    from tqdm.auto import tqdm
+    from itertools import product
+    options = list(product(options, options, options))
+    random.shuffle(options)
+    max_mfu = 0
+    best = None
+    failed = set()
+    for x, y, z in (bar := tqdm(options)):
+        group = (x, y, z)
+        for f in failed:
+            if all(f[i] < group[i] for i in range(3)):
+                continue
+        try:
+            mfu = time_mfu(10, group)[1]
+        except Exception as e:
+            print(type(e))
+            failed.add(group)
+            mfu = 0
+        max_mfu, best = max((max_mfu, best), (mfu, group))
+        bar.set_postfix(max_mfu=max_mfu, best=best)
+    print(f"Best MFU: {max_mfu:.2f} with {best}")
+    exit()
+    
     # with jax.default_device(jax.devices("cpu")[0]):
     #     a, b, c = 512, 512, 512
 

@@ -292,6 +292,7 @@ def main():
     logger.info("Creating mesh")
     # shape_request = (1, -1, 1)
     shape_request = (-1, 1, 1)
+    # shape_request = (2, 2, 1)
     device_count = jax.device_count()
     mesh_shape = np.arange(device_count).reshape(*shape_request).shape
     physical_mesh = mesh_utils.create_device_mesh(mesh_shape)
