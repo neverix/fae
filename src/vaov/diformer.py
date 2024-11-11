@@ -447,7 +447,7 @@ def preprocess_official(flux, model):
                                ("vector_in", "guidance_in")):
             array_flux[key] = x
             continue
-        x = QuantMatrix.quantize(x, mode="i8", group_size=32)
+        x = QuantMatrix.quantize(x, mode="nf4", group_size=64)
         array_flux[key] = x
     flux = array_flux
 
