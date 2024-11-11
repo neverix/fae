@@ -301,7 +301,7 @@ def main():
     inferencer = DiFormerInferencer(mesh)
     logger.info("Creating inputs")
     # batch_size = device_count
-    batch_size = 32
+    batch_size = 48
     image_inputs = inferencer.image_input(
         [dog_image] * batch_size, timesteps=0.5, key=jax.random.key(1)
     )
@@ -313,6 +313,7 @@ def main():
     logger.info("Running model")
     result = jax.block_until_ready(inferencer(text_inputs, image_inputs))
     logger.info("Running model for debug")
+    return
     result = jax.block_until_ready(inferencer(text_inputs, image_inputs, debug_mode=True))
 
     logger.info("Comparing results")

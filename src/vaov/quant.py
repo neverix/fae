@@ -281,7 +281,9 @@ def matmul_nf4_kernel(
         w1 = (quants.astype(jnp.float32) / 127.5) * scale.astype(jnp.float32) 
     else:
         quants = i4tou4(quants.astype(jnp.int32))
-        w1 = nf4xf32_to_f32(quants) * scale
+        quants = nf4xf32_to_f32(quants)
+        # quants = quants.astype(jnp.float32)
+        w1 = quants * scale
     inputs = inputs_ref[...]
     accum_ref[...] += jnp.dot(inputs, w1.reshape(block_k, -1), preferred_element_type=jnp.float32)
     
@@ -526,6 +528,9 @@ def dot_general_handler(
 
     orig_a_shape = a.shape
     if True:  # 🤡
+        # TODO handle FSDP
+        if b.mesh_and_axis is not None:
+            raise NotImplementedError
         dq = b.dequantize()
         out = a @ dq
     elif b.mesh_and_axis is not None:
