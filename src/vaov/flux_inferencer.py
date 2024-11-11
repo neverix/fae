@@ -281,7 +281,7 @@ def main():
 
     dog_image_url = "https://www.akc.org/wp-content/uploads/2017/11/Shiba-Inu-standing-in-profile-outdoors.jpg"
     dog_image = Image.open(requests.get(dog_image_url, stream=True).raw)
-    dog_image = dog_image.resize((256, 256))
+    dog_image = dog_image.resize((1024, 720))
 
     torch.set_grad_enabled(False)
     text_encodings = torch.load(
@@ -299,14 +299,19 @@ def main():
     logger.info("Creating inferencer")
     inferencer = DiFormerInferencer(mesh)
     logger.info("Creating inputs")
-    batch_size = device_count
+    # batch_size = device_count
+    batch_size = 32
     image_inputs = inferencer.image_input(
         [dog_image] * batch_size, timesteps=0.5, key=jax.random.key(1)
     )
     text_inputs = inferencer.text_input(
         t5_emb.repeat(batch_size, 1, 1), clip_emb.repeat(batch_size, 1)
     )
+    logger.info("Warming up model")
+    result = inferencer(text_inputs, image_inputs)
     logger.info("Running model")
+    result = inferencer(text_inputs, image_inputs)
+    logger.info("Running model for debug")
     result = inferencer(text_inputs, image_inputs, debug_mode=True)
 
     logger.info("Comparing results")

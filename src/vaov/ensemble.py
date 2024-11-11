@@ -1,4 +1,6 @@
 import jax
+import equinox as eqx
+from functools import partial
 from typing import List
 import jax.numpy as jnp
 import numpy as np
@@ -13,7 +15,8 @@ class FluxEnsemble:
     def __init__(self):
         logger.info("Creating mesh")
         local_device_count = jax.local_device_count()
-        shape_request = (-1, local_device_count, 1)
+        # shape_request = (-1, local_device_count, 1)
+        shape_request = (-1, 1, 1)
         device_count = jax.device_count()
         mesh_shape = np.arange(device_count).reshape(*shape_request).shape
         physical_mesh = mesh_utils.create_device_mesh(mesh_shape)
@@ -23,7 +26,7 @@ class FluxEnsemble:
         self.t5 = T5EncoderInferencer(self.mesh)
         self.flux = DiFormerInferencer(self.mesh)
 
-    def sample(self, texts: list[str], width: int = 512, height: int = 512,
+    def sample(self, texts: List[str], width: int = 512, height: int = 512,
                sample_steps: int = 20):
         n_tokens = width * height / (16 * 16)
         schedule = get_flux_schedule(n_tokens, sample_steps)
@@ -43,18 +46,22 @@ class FluxEnsemble:
                                             timesteps=1, guidance_scale=4.0,
                                             key=jax.random.key(5))
         logger.info("Sampling image")
-        def sample_step(image_input, timesteps):
-            more_noisy, less_noisy = timesteps
-            return self.flux(text_input, image_input).next_input(more_noisy - less_noisy), None
-        schedule = (schedule[:-1], schedule[1:])
-        denoised = jax.block_until_ready(jax.lax.scan(sample_step, image_input, schedule)[0].encoded)
-        # ... step here to fully denoise the image
+        denoised = jax.block_until_ready(sample_jit(self.flux, text_input, image_input, schedule))
         logger.info("Decoding")
         vae = self.flux.vae
         denoised = denoised.reshape(-1, *denoised.shape[2:])
         decoded = np.asarray(vae.decode(denoised))
         for i in range(denoised.shape[0]):
             yield vae.deprocess(decoded[i:i+1])
+
+
+@partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
+def sample_jit(flux_logic, flux_weigths, text_input, image_input, schedule):
+    flux = eqx.combine(flux_logic, flux_weigths)
+    def sample_step(image_input, timesteps):
+        more_noisy, less_noisy = timesteps
+        return flux(text_input, image_input).next_input(more_noisy - less_noisy), None
+    return jax.lax.scan(sample_step, image_input, schedule)[0].encoded
 
 
 def get_flux_schedule(n_seq: int, n_steps: int):
