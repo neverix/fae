@@ -626,7 +626,7 @@ class SingleStreamBlock(eqx.Module):
         par_out = attn_out + mlp_out
         if debug_first:
             sow_debug(dict(out=par_out, gate=mod.gate), "first_single_pre_out")
-        out = x + fg(mod.gate * par_out)
+        out = data + fg(mod.gate * par_out)
         if debug_first:
             sow_debug(dict(out=out), "first_single_out")
         out = fr(out)

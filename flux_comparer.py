@@ -66,7 +66,7 @@ with torch.inference_mode():
             try:
                 old_value = reaped[key]
             except KeyError:
-                print("warning: missing", key)
+                print("warning: missing", key, "(shape:", value.shape, "norm:", str(value.abs().mean()) + ")")
                 continue
             if old_value.shape[1:] == value.shape:
                 layer_index = n_occurred.get(key, 0)
@@ -77,6 +77,6 @@ with torch.inference_mode():
             n_occurred[key] += 1
 x = x["img"]
 x = unpack(x.float(), h * 16, w * 16)
-denoised = torch.from_numpy(noised) - 0.1 * x
-generated = vae.deprocess(vae.decode(denoised))
-generated.save("somewhere/denoised_torch.jpg")
+denoised = noised - 0.5 * x
+# generated = vae.deprocess(vae.decode(denoised))
+# generated.save("somewhere/denoised_torch.jpg")
