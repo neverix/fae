@@ -927,7 +927,7 @@ wheels = [
 
 [[package]]
 name = "qax"
-version = "0.3.1"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
@@ -935,9 +935,9 @@ dependencies = [
     { name = "optax" },
     { name = "plum-dispatch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8b/2e/9cdce15e5a4eaa545dc4bf15bd8a04f76f59f488663849ce1c2a0f3c4165/qax-0.3.1.tar.gz", hash = "sha256:67741508846517b000eeb289cc41e336da6b94d2cb3ee8c9ef9206791e18bd25", size = 28049 }
+sdist = { url = "https://files.pythonhosted.org/packages/77/df/8471853c02d9d8983d399ed8f57a32ee29a7fb6adb4a36baf27ab6c36ed8/qax-0.4.0.tar.gz", hash = "sha256:4c6f62b8acd1f7964f1b80e08f23360c1290b4e4c78ba791b3003027f4317370", size = 27763 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f2/a1/c61a88e851a49a23a51cf5a32dbc784e7e386f3a426d44c9061a2eba0ecf/qax-0.3.1-py3-none-any.whl", hash = "sha256:d1d2e71b013dae950f0cf0a7d5a9f5d22b7535b96fab8815b9604c02f66501b1", size = 26796 },
+    { url = "https://files.pythonhosted.org/packages/8c/21/814f5ca097344e1a56fd7c45158d575fa8d0b805cab2ac488bc56643418d/qax-0.4.0-py3-none-any.whl", hash = "sha256:155ed482c5cbcbf22605124d97f237b0ed3b537245f3561a6e7dd4ffdd2b6631", size = 26237 },
 ]
 
 [[package]]
@@ -1354,7 +1354,7 @@ requires-dist = [
     { name = "onnx", specifier = ">=1.17.0" },
     { name = "orbax", specifier = ">=0.1.9" },
     { name = "oryx", specifier = ">=0.2.7" },
-    { name = "qax", specifier = ">=0.3.1" },
+    { name = "qax", specifier = ">=0.4.0" },
     { name = "sentencepiece", specifier = ">=0.2.0" },
     { name = "torch", specifier = ">=2.4.1" },
     { name = "transformers", specifier = ">=4.44.2" },
