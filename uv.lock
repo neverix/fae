@@ -391,7 +391,7 @@ wheels = [
 
 [[package]]
 name = "jax"
-version = "0.4.34"
+version = "0.4.35"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jaxlib" },
@@ -400,14 +400,15 @@ dependencies = [
     { name = "opt-einsum" },
     { name = "scipy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/19/6a/cacfcdf77841a4562e555ef35e0dbc5f8ca79c9f1010aaa4cf3973e79c69/jax-0.4.34.tar.gz", hash = "sha256:44196854f40c5f9cea3142824b9f1051f85afc3fcf7593ec5479fc8db01c58db", size = 1848472 }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/34/21da583b9596e72bb8e95b6197dee0a44b96b9ea2c147fccabd43ca5515b/jax-0.4.35.tar.gz", hash = "sha256:c0c986993026b10bf6f607fecb7417377460254640766ce40f1fef3fd139c12e", size = 1861189 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/06/f3/c499d358dd7f267a63d7d38ef54aadad82e28d2c28bafff15360c3091946/jax-0.4.34-py3-none-any.whl", hash = "sha256:b957ca1fc91f7343f91a186af9f19c7f342c946f95a8c11c7f1e5cdfe2e58d9e", size = 2144294 },
+    { url = "https://files.pythonhosted.org/packages/62/20/6c57c50c0ccc645fea1895950f1e5cd02f961ee44b3ffe83617fa46b0c1d/jax-0.4.35-py3-none-any.whl", hash = "sha256:fa99e909a31424abfec750019a6dd36f6acc18a6e7d40e2c0086b932cc351325", size = 2158621 },
 ]
 
 [package.optional-dependencies]
 tpu = [
     { name = "jaxlib" },
+    { name = "libtpu" },
     { name = "libtpu-nightly" },
     { name = "requests" },
 ]
@@ -561,11 +562,19 @@ wheels = [
 ]
 
 [[package]]
-name = "libtpu-nightly"
-version = "0.1.dev20241002+nightly"
-source = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" }
+name = "libtpu"
+version = "0.0.2"
+source = { url = "https://storage.googleapis.com/libtpu-lts-releases/wheels/libtpu/libtpu-0.0.2-py3-none-any.whl" }
 wheels = [
-    { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl", hash = "sha256:d3aa08af25f0151643c70469534319f5a26921494a657afec66035e5a4f208e2" },
+    { url = "https://storage.googleapis.com/libtpu-lts-releases/wheels/libtpu/libtpu-0.0.2-py3-none-any.whl", hash = "sha256:9e1f7899ece1f4bb8c0832f5570246b46f1ca57837e5b62e1409ee48cf06403f" },
+]
+
+[[package]]
+name = "libtpu-nightly"
+version = "0.1.dev20241010+nightly.cleanup"
+source = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241010+nightly.cleanup-py3-none-any.whl" }
+wheels = [
+    { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241010+nightly.cleanup-py3-none-any.whl", hash = "sha256:935fe93a8d34e4566c168e9bc8c690d4729d5cf4e051625e86f4e4fa9a261232" },
 ]
 
 [[package]]
@@ -850,14 +859,10 @@ wheels = [
 [[package]]
 name = "oryx"
 version = "0.2.7"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/jax-ml/oryx?rev=339bc9215962dc998637d53ca8f19a3cea100ec0#339bc9215962dc998637d53ca8f19a3cea100ec0" }
 dependencies = [
     { name = "jax" },
     { name = "tensorflow-probability" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/51/d6/35ed784a053797e5c0d644c589641792be47b95d24b6db7f8bcaeb179eba/oryx-0.2.7.tar.gz", hash = "sha256:6fa1fea1beae126a3d289cdda54c3852934e0587541cc60cbc53a366c6c9c953", size = 140373 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/6e/a06c641e6fd0434dcc7240cebefd9c78436d3fffb06a6f950d84c6f51bda/oryx-0.2.7-py3-none-any.whl", hash = "sha256:f8d3816849fedd5dc208021699223d964caab1f316fe95c8c0e53af68c6bbfbc", size = 206516 },
 ]
 
 [[package]]
@@ -1473,6 +1478,7 @@ dependencies = [
     { name = "jax", extra = ["tpu"] },
     { name = "jax-smi" },
     { name = "jaxonnxruntime" },
+    { name = "libtpu" },
     { name = "libtpu-nightly" },
     { name = "loguru" },
     { name = "matplotlib" },
@@ -1492,15 +1498,16 @@ requires-dist = [
     { name = "equinox", specifier = ">=0.11.5" },
     { name = "fastapi", specifier = ">=0.115.4" },
     { name = "flax", specifier = ">=0.9.0" },
-    { name = "jax", extras = ["tpu"], specifier = ">=0.4.34" },
+    { name = "jax", extras = ["tpu"], specifier = ">=0.4.35" },
     { name = "jax-smi", specifier = ">=1.0.4" },
     { name = "jaxonnxruntime", directory = "jort" },
-    { name = "libtpu-nightly", url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" },
+    { name = "libtpu", url = "https://storage.googleapis.com/libtpu-lts-releases/wheels/libtpu/libtpu-0.0.2-py3-none-any.whl" },
+    { name = "libtpu-nightly", url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241010+nightly.cleanup-py3-none-any.whl" },
     { name = "loguru", specifier = ">=0.7.2" },
     { name = "matplotlib", specifier = ">=3.9.2" },
     { name = "onnx", specifier = ">=1.17.0" },
     { name = "orbax", specifier = ">=0.1.9" },
-    { name = "oryx", specifier = ">=0.2.7" },
+    { name = "oryx", git = "https://github.com/jax-ml/oryx?rev=339bc9215962dc998637d53ca8f19a3cea100ec0" },
     { name = "qax", specifier = ">=0.4.0" },
     { name = "sentencepiece", specifier = ">=0.2.0" },
     { name = "torch", specifier = ">=2.4.1" },

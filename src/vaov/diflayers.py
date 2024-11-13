@@ -573,6 +573,9 @@ class DoubleStreamBlock(eqx.Module):
 
         img = fr(img)
         txt = fr(txt)
+        
+        img = sow(img, tag="interp", name="double_img", mode="append")
+        txt = sow(txt, tag="interp", name="double_txt", mode="append")
 
         return dict(img=img, txt=txt)
 

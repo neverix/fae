@@ -12,6 +12,7 @@ from jaxtyping import Array, Float, UInt
 from typing import Optional
 from .quant import QuantMatrix
 from .quant_loading import load_thing, save_thing
+from oryx.core import sow
 import qax.primitives
 import qax
 import jax.numpy as jnp
@@ -185,6 +186,11 @@ class DiFormer(eqx.Module):
         mask = jnp.concatenate((txt_mask, img_mask), -1)
         data = dict(img=img, txt=txt)
         sow_debug(dict(img=img, txt=txt, vec=vec, pe=pe, mask=mask), "pre_double")
+        sow(img, tag="interp", name="img_proj")
+        sow(txt, tag="interp", name="txt_proj")
+        sow(vec, tag="interp", name="vec_proj")
+        sow(pe, tag="interp", name="pe")
+        sow(mask, tag="interp", name="mask")
         
         # is not actually called if we don't reap
         first_double = self.double_blocks.call_first(
