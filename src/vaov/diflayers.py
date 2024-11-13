@@ -492,90 +492,80 @@ class DoubleStreamBlock(eqx.Module):
             MLP(config, key=k) for k in jax.random.split(key, 2)
         )
 
-    def __call__(self, data, vec, pe, mask=None, debug_first=False):
+    def __call__(self, data, vec, pe, mask=None):
         img, txt = data["img"], data["txt"]
         txt_len = txt.shape[-2]
 
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
 
-        if debug_first:
-            sow_debug(
-                dict(
-                    img_mod1_shift=img_mod1.shift,
-                    img_mod1_scale=img_mod1.scale,
-                    img_mod1_gate=img_mod1.gate,
-                    img_mod2_shift=img_mod2.shift,
-                    img_mod2_scale=img_mod2.scale,
-                    img_mod2_gate=img_mod2.gate,
-                    txt_mod1_shift=txt_mod1.shift,
-                    txt_mod1_scale=txt_mod1.scale,
-                    txt_mod1_gate=txt_mod1.gate,
-                    txt_mod2_shift=txt_mod2.shift,
-                    txt_mod2_scale=txt_mod2.scale,
-                    txt_mod2_gate=txt_mod2.gate,
-                ),
-                "first_double_modulations",
-            )
+        sow_debug(
+            dict(
+                img_mod1_shift=img_mod1.shift,
+                img_mod1_scale=img_mod1.scale,
+                img_mod1_gate=img_mod1.gate,
+                img_mod2_shift=img_mod2.shift,
+                img_mod2_scale=img_mod2.scale,
+                img_mod2_gate=img_mod2.gate,
+                txt_mod1_shift=txt_mod1.shift,
+                txt_mod1_scale=txt_mod1.scale,
+                txt_mod1_gate=txt_mod1.gate,
+                txt_mod2_shift=txt_mod2.shift,
+                txt_mod2_scale=txt_mod2.scale,
+                txt_mod2_gate=txt_mod2.gate,
+            ),
+            "double_modulations",
+        )
 
         img_normed = self.img_norm1(img)
         img_modulated = img_mod1(img_normed)
-        if debug_first:
-            sow_debug(
-                dict(img_normed=img_normed, img_modulated=img_modulated),
-                "first_double_img_mod",
-            )
+        sow_debug(
+            dict(img_normed=img_normed, img_modulated=img_modulated),
+            "double_img_mod",
+        )
         img_q, img_k, img_v = self.img_attn.qkv(img_modulated)
-        if debug_first:
-            sow_debug(
-                dict(img_q=img_q, img_k=img_k, img_v=img_v), "first_double_img_qkv"
-            )
+        sow_debug(
+            dict(img_q=img_q, img_k=img_k, img_v=img_v), "double_img_qkv"
+        )
 
         txt_normed = self.txt_norm1(txt)
         txt_modulated = txt_mod1(txt_normed)
-        if debug_first:
-            sow_debug(
-                dict(txt_normed=txt_normed, txt_modulated=txt_modulated),
-                "first_double_txt_mod",
-            )
+        sow_debug(
+            dict(txt_normed=txt_normed, txt_modulated=txt_modulated),
+            "double_txt_mod",
+        )
         txt_q, txt_k, txt_v = self.txt_attn.qkv(txt_modulated)
-        if debug_first:
-            sow_debug(
-                dict(txt_q=txt_q, txt_k=txt_k, txt_v=txt_v), "first_double_txt_qkv"
-            )
+        sow_debug(
+            dict(txt_q=txt_q, txt_k=txt_k, txt_v=txt_v), "double_txt_qkv"
+        )
 
         q = jnp.concatenate((txt_q, img_q), axis=-2)
         k = jnp.concatenate((txt_k, img_k), axis=-2)
         v = jnp.concatenate((txt_v, img_v), axis=-2)
 
         attn = attention(q, k, v, pe, mask=mask)
-        if debug_first:
-            sow_debug(dict(attn=attn), "first_double_attn")
+        sow_debug(dict(attn=attn), "double_attn")
         txt_attn, img_attn = attn[..., :txt_len, :], attn[..., txt_len:, :]
 
         img_out1 = img_mod1.gate * self.img_attn.o_proj(img_attn)
         img = img + fg(img_out1)
-        if debug_first:
-            sow_debug(dict(img=img), "first_double_img_gated")
+        sow_debug(dict(img=img), "double_img_gated")
         img_out2 = img_mod2.gate * self.img_mlp(img_mod2(self.img_norm2(img)))
         img = img + fg(img_out2)
-        if debug_first:
-            sow_debug(dict(img=img), "first_double_img_mlp_gated")
+        sow_debug(dict(img=img), "double_img_mlp_gated")
 
         txt_out1 = txt_mod1.gate * self.txt_attn.o_proj(txt_attn)
         txt = txt + fg(txt_out1)
-        if debug_first:
-            sow_debug(dict(txt=txt), "first_double_txt_gated")
+        sow_debug(dict(txt=txt), "double_txt_gated")
         txt_out2 = txt_mod2.gate * self.txt_mlp(txt_mod2(self.txt_norm2(txt)))
         txt = txt + fg(txt_out2)
-        if debug_first:
-            sow_debug(dict(txt=txt), "first_double_txt_mlp_gated")
+        sow_debug(dict(txt=txt), "double_txt_mlp_gated")
 
         img = fr(img)
         txt = fr(txt)
         
-        img = sow(img, tag="interp", name="double_img", mode="append")
-        txt = sow(txt, tag="interp", name="double_txt", mode="append")
+        sow(img, tag="interp", name="double_img", mode="append")
+        sow(txt, tag="interp", name="double_txt", mode="append")
 
         return dict(img=img, txt=txt)
 
@@ -608,29 +598,24 @@ class SingleStreamBlock(eqx.Module):
 
         self.modulation = Modulation(config.hidden_size, double=False, key=key)
 
-    def __call__(self, data, vec, pe, mask=None, debug_first=False):
+    def __call__(self, data, vec, pe, mask=None):
         mod, _ = self.modulation(vec)
         x = self.pre_norm(data)
         x = mod(x)
-        if debug_first:
-            sow_debug(dict(x=x), "first_single_norm")
+        sow_debug(dict(x=x), "single_norm")
 
         attn_pre = self.attn(x, pe, mask=mask, no_out=True)
         attn_out = self.attn(x, pe, mask=mask)
-        if debug_first:
-            sow_debug(
-                dict(attn_pre=attn_pre, attn_out=attn_out), "first_single_attn_pre"
-            )
+        sow_debug(
+            dict(attn_pre=attn_pre, attn_out=attn_out), "single_attn_pre"
+        )
         mlp_pre = self.mlp(x, no_out=True)
         mlp_out = self.mlp(x)
-        if debug_first:
-            sow_debug(dict(mlp_pre=mlp_pre, mlp_out=mlp_out), "first_single_mlp_pre")
+        sow_debug(dict(mlp_pre=mlp_pre, mlp_out=mlp_out), "single_mlp_pre")
 
         par_out = attn_out + mlp_out
-        if debug_first:
-            sow_debug(dict(out=par_out, gate=mod.gate), "first_single_pre_out")
+        sow_debug(dict(out=par_out, gate=mod.gate), "single_pre_out")
         out = data + fg(mod.gate * par_out)
-        if debug_first:
-            sow_debug(dict(out=out), "first_single_out")
+        sow_debug(dict(out=out), "single_out")
         out = fr(out)
         return out
