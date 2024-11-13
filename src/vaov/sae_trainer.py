@@ -41,6 +41,7 @@ class SAEOutput:
     k_indices: UInt[Array, "batch_size k"]
     y_normed: Float[Array, "batch_size d_model"]
     y: Float[Array, "batch_size d_model"]
+    losses: dict[str, Float[Array, "batch_size"]]
     loss: Float[Array, "batch_size"]
 
 
@@ -117,6 +118,15 @@ class SAE(eqx.Module):
         decoded = (weights[..., None] * self.W_dec[indices]).sum(-1)
         y_normed = decoded + self.b_post
         y = info.denorm(y_normed)
+        recon_loss = jnp.mean(jnp.square(x_normed - y_normed), axis=-1)
+        recon_loss = jnp.where(info.n_steps > 0, recon_loss, 0)
+        
+        # TODO decode with aux_k
+        aux_y_normed = y_normed
+        aux_k_loss = jnp.mean(jnp.square(x_normed - aux_y_normed), axis=-1)
+        aux_k_loss = jnp.where(info.n_steps >= self.config.aux_k_after, aux_k_loss, 0)
+        
+        loss = recon_loss + self.config.aux_k_coeff * aux_k_loss
         return SAEOutput(
             x_normed=x_normed,
             x=x,
@@ -124,7 +134,11 @@ class SAE(eqx.Module):
             k_indices=indices,
             y_normed=y_normed,
             y=y,
-            loss=jnp.where(info.n_steps > 0, jnp.mean(jnp.square(x_normed - y_normed), axis=-1), 0)
+            losses=dict(
+                recon_loss=recon_loss,
+                aux_k_loss=aux_k_loss
+            ),
+            loss=loss
         )
     
     def apply_updates(self, updates: "SAE", past_output: SAEOutput) -> "SAE":
