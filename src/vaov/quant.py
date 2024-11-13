@@ -38,6 +38,8 @@ nf4 = jnp.asarray(
 )
 
 
+USE_KERNEL = False
+
 BIG_POLYNOMIAL = False
 def nf4xf32_to_f32(x):
     x = x.astype(jnp.float32)
@@ -541,12 +543,15 @@ def dot_general_handler(
     a = a.astype(compute_dtype)
 
     orig_a_shape = a.shape
-    def matmul_fast(inputs, *tensors, kernel=None):
-        return (inputs @ dequantize_vmap(*tensors,
-                                        use_approx=b.use_approx,
-                                        orig_dtype=og_dtype,
-                                        mode="i8" if b.quants.dtype == jnp.int8 else "nf4")).astype(compute_dtype)
-    
+    if USE_KERNEL:
+        mf = matmul_fast
+    else:
+        def mf(inputs, *tensors, kernel=None):
+            return (inputs @ dequantize_vmap(*tensors,
+                                            use_approx=b.use_approx,
+                                            orig_dtype=og_dtype,
+                                            mode="i8" if b.quants.dtype == jnp.int8 else "nf4")).astype(compute_dtype)
+        
     if b.mesh_and_axis is not None:
         mesh, map_axis = b.mesh_and_axis
         tensors = b.quants, b.scales
@@ -557,7 +562,7 @@ def dot_general_handler(
             def matmul(inputs, *tensors):
                 orig_inputs_shape = inputs.shape
                 inputs = inputs.reshape(-1, inputs.shape[-1])
-                outputs = matmul_fast(inputs, *tensors, kernel=matmul_nf4_kernel)
+                outputs = mf(inputs, *tensors, kernel=matmul_nf4_kernel)
                 outputs = outputs.reshape(*orig_inputs_shape[:-1], outputs.shape[-1])
                 if map_axis == 0:
                     outputs = jax.lax.psum(outputs, axis_name="tp")
@@ -575,7 +580,7 @@ def dot_general_handler(
         elif mesh.shape["fsdp"] == 1:
             def matmul_inner(a, *tensors):
                 a = a.reshape(-1, a.shape[-1])
-                out = matmul_fast(a, *tensors, kernel=matmul_nf4_kernel)
+                out = mf(a, *tensors, kernel=matmul_nf4_kernel)
                 return out
             a = a.reshape(-1, a.shape[1], a.shape[-1])
             out = jax.experimental.shard_map.shard_map(
@@ -605,7 +610,11 @@ def dot_general_handler(
                 accum = jnp.zeros((inputs.shape[0], inputs.shape[1], b.shape[1]), dtype=compute_dtype)
                 def loop_body(i, args):
                     accum, inputs, tensors = args
-                    partial_result = matmul_fast(inputs.reshape(-1, inputs.shape[-1]), *tensors, kernel=matmul_nf4_kernel)
+                    partial_result = mf(
+                        inputs.reshape(-1, inputs.shape[-1]),
+                        *tensors,
+                        kernel=matmul_nf4_kernel,
+                    )
                     partial_result = partial_result.reshape(*inputs.shape[:-1], -1)
                     chunk_size = partial_result.shape[-1]
                     accum = jax.lax.dynamic_update_slice(accum, partial_result, (0, 0, ((axis_index + i) % axis_size)*chunk_size))
@@ -641,7 +650,7 @@ def dot_general_handler(
     else:
         # Reshape a to be 2-D
         a = a.reshape(-1, b.shape[0])
-        out = matmul_fast(a, b.quants, b.scales, kernel=matmul_nf4_kernel)
+        out = mf(a, b.quants, b.scales, kernel=matmul_nf4_kernel)
     return out.reshape(*orig_a_shape[:-1], out.shape[-1]).astype(og_dtype)
 
 
