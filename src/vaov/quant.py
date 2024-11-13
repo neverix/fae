@@ -344,15 +344,21 @@ def matmul_nf4_kernel_transpose(
     outputs_ref[...] = accum.astype(outputs_ref.dtype)
 
 
+@partial(jax.jit, static_argnums=(1, ))
+def dequantize_quants(group, mode):
+    if mode == "nf4":
+        group = i4tou4(group.astype(jnp.int32))
+        stacked = nf4xf32_to_f32(group)
+    else:
+        stacked = group.astype(jnp.float32) / 127.5
+
+    return stacked
+
 @partial(jax.jit, static_argnums=(3, 4))
 def dequantize_group(group, scale, codebook, orig_dtype, mode):
 
     # codebook = codebook.astype(orig_dtype)
-    if mode == "nf4":
-        group = i4tou4(group.astype(np.int32))
-        stacked = nf4xf32_to_f32(group)
-    else:
-        stacked = group.astype(jnp.float32) / 127.5
+    stacked = dequantize_quants(group, mode)
 
     return (stacked * scale).reshape(-1).astype(orig_dtype)
 
@@ -368,9 +374,13 @@ def dequantize_vmap(quants, scales, *, use_approx, orig_dtype, mode):
 
     group_size = quants.shape[1]
 
+    quants_deq = dequantize_quants(quants, mode)
+    full_weights = quants_deq * scales
+    return full_weights.reshape(-1, quants.shape[-1]).astype(orig_dtype)
+
     # unquant_matrix = jax.vmap(
-    #     jax.vmap(dequantize_group, in_axes=(0, 0, None, None, None)),
-    #     in_axes=(2, 2, None, None, None),
+    #     jax.vmap(dequantize_group, in_axes=(1, 1, None, None, None)),
+    #     in_axes=(0, 0, None, None, None),
     # )(quants, scales, codebook, orig_dtype, mode)
     # unquant_matrix = unquant_matrix.reshape(-1, quants.shape[2])
 

@@ -333,28 +333,29 @@ def main():
     result = jax.block_until_ready(inferencer(text_inputs, image_inputs))
     logger.info("Running model")
     result = jax.block_until_ready(inferencer(text_inputs, image_inputs))
-    logger.info("Running model for debug")
-    result = jax.block_until_ready(inferencer(text_inputs, image_inputs, debug_mode=True))
+    if False:
+        logger.info("Running model for debug")
+        result = jax.block_until_ready(inferencer(text_inputs, image_inputs, debug_mode=True))
 
-    logger.info("Comparing results")
-    pred_noise = result.noise[0, :1]
-    noise = image_inputs.noise[0, :1]
-    print(
-        jnp.mean(jnp.square(noise)),
-        jnp.mean(jnp.square(pred_noise)),
-        jnp.mean(jnp.square(noise - pred_noise)),
-    )
-    print(jnp.mean(jnp.square(result.prediction - result.ground_truth)))
-    print(
-        jnp.mean(
-            jnp.square(
-                # jax.random.normal(jax.random.key(0), result.prediction.shape)
-                (-image_inputs.encoded)
-                - result.ground_truth
+        logger.info("Comparing results")
+        pred_noise = result.noise[0, :1]
+        noise = image_inputs.noise[0, :1]
+        print(
+            jnp.mean(jnp.square(noise)),
+            jnp.mean(jnp.square(pred_noise)),
+            jnp.mean(jnp.square(noise - pred_noise)),
+        )
+        print(jnp.mean(jnp.square(result.prediction - result.ground_truth)))
+        print(
+            jnp.mean(
+                jnp.square(
+                    # jax.random.normal(jax.random.key(0), result.prediction.shape)
+                    (-image_inputs.encoded)
+                    - result.ground_truth
+                )
             )
         )
-    )
-    print({k: v.shape for k, v in result.reaped.items()})
+        print({k: v.shape for k, v in result.reaped.items()})
     
     logger.info("Saving results")
     vae = inferencer.vae
