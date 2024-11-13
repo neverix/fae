@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 from .clip import CLIPInterface
 from .t5 import T5EncoderInferencer
-from .flux_inferencer import DiFormerInferencer
+from .flux_inferencer import DiFormerInferencer, random_or
 from .diflayers import DiFormerConfig
 from oryx.core.interpreters.harvest import sow, call_and_reap
 from jax.experimental import mesh_utils
@@ -58,7 +58,8 @@ class FluxEnsemble:
         self.flux = DiFormerInferencer(self.mesh, diformer_kwargs=diformer_kwargs)
 
     def sample(self, texts: List[str], width: int = 512, height: int = 512,
-               sample_steps: int = 1, debug_mode=False, decode_latents=True):
+               sample_steps: int = 1, debug_mode=False, decode_latents=True,
+               key=None):
         n_tokens = width * height / (16 * 16)
         schedule = get_flux_schedule(n_tokens, sample_steps,
                                      shift_time=self.curve_schedule)
@@ -74,9 +75,10 @@ class FluxEnsemble:
         )
         logger.info("Preparing image input")
         prototype = Image.new("RGB", (width, height), (127, 127, 127))
+        key = random_or(key)
         image_input = self.flux.image_input([prototype] * batch_size,
                                             timesteps=1, guidance_scale=4.0,
-                                            key=jax.random.key(5))
+                                            key=key)
         logger.info("Sampling image")
         result = sample_jit(self.flux, text_input, image_input, schedule, debug_mode=debug_mode)
         # man, this would be cleaner as a monad
