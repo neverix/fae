@@ -19,6 +19,7 @@ class SampleRequest(BaseModel):
     prompts: List[str]
     width: int = 512
     height: int = 512
+    sample_steps: int = 3
 
 
 @app.post("/sample")
@@ -33,6 +34,7 @@ async def generate_images(request: SampleRequest):
             request.prompts,
             width=request.width,
             height=request.height,
+            sample_steps=request.sample_steps,
         )
     ):
         # Convert the generated PIL image to bytes for response

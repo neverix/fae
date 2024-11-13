@@ -1,6 +1,6 @@
 import jax
 import equinox as eqx
-from functools import partial
+from dataclasses import replace
 from typing import List
 import jax.numpy as jnp
 import numpy as np
@@ -8,28 +8,59 @@ from PIL import Image
 from .clip import CLIPInterface
 from .t5 import T5EncoderInferencer
 from .flux_inferencer import DiFormerInferencer
+from .diflayers import DiFormerConfig
 from jax.experimental import mesh_utils
 from loguru import logger
 
 class FluxEnsemble:
-    def __init__(self):
+    def __init__(
+        self,
+        use_schnell=True,
+        use_fsdp=False,
+        diformer_kwargs: dict = None,
+        clip_name=None,
+        t5_name=None,
+    ):
+        self.use_schnell = use_schnell
+        curve_schedule = True
+        if use_schnell:
+            curve_schedule = False
+            if diformer_kwargs is None:
+                diformer_kwargs = {}
+            diformer_kwargs["hf_path"] = (
+                "black-forest-labs/FLUX.1-schnell",
+                "flux1-schnell.safetensors",
+            )
+            diformer_kwargs["custom_config"] = replace(
+                DiFormerConfig(),
+                guidance_embed=False
+            )
         logger.info("Creating mesh")
-        local_device_count = jax.local_device_count()
-        # shape_request = (-1, local_device_count, 1)
-        shape_request = (-1, 1, 1)
+        self.curve_schedule = curve_schedule
+        if use_fsdp:
+            local_device_count = jax.local_device_count()
+            shape_request = (-1, local_device_count, 1)
+        else:
+            shape_request = (-1, 1, 1)
         device_count = jax.device_count()
         mesh_shape = np.arange(device_count).reshape(*shape_request).shape
         physical_mesh = mesh_utils.create_device_mesh(mesh_shape)
         self.mesh = jax.sharding.Mesh(physical_mesh, ("dp", "fsdp", "tp"))
         
-        self.clip = CLIPInterface(self.mesh)
-        self.t5 = T5EncoderInferencer(self.mesh)
-        self.flux = DiFormerInferencer(self.mesh)
+        logger.info("Creating CLIP")
+        self.clip = CLIPInterface(self.mesh, clip_name=clip_name)
+        logger.info("Creating T5")
+        self.t5 = T5EncoderInferencer(self.mesh, model_name=t5_name)
+        logger.info("Creating Flux")
+        if diformer_kwargs is None:
+            diformer_kwargs = {}
+        self.flux = DiFormerInferencer(self.mesh, diformer_kwargs=diformer_kwargs)
 
     def sample(self, texts: List[str], width: int = 512, height: int = 512,
-               sample_steps: int = 20):
+               sample_steps: int = 1):
         n_tokens = width * height / (16 * 16)
-        schedule = get_flux_schedule(n_tokens, sample_steps)
+        schedule = get_flux_schedule(n_tokens, sample_steps,
+                                     shift_time=self.curve_schedule)
         
         logger.info("Sampling image for texts: {}", texts)
         batch_size = len(texts)
@@ -64,12 +95,13 @@ def sample_jit(flux, text_input, image_input, schedule):
     return jax.lax.scan(sample_step, image_input, schedule)[0].encoded
 
 
-def get_flux_schedule(n_seq: int, n_steps: int):
+def get_flux_schedule(n_seq: int, n_steps: int, shift_time=True):
     # https://github.com/black-forest-labs/flux/blob/478338d52759f92af9eeb92cc9eaa49582b20c78/src/flux/sampling.py#L78
     schedule = jnp.linspace(1, 0, n_steps + 1)
-    mu = mu_estimator(n_seq)
-    timesteps = time_shift(mu, 1.0, schedule)
-    return timesteps
+    if shift_time:
+        mu = mu_estimator(n_seq)
+        schedule = time_shift(mu, 1.0, schedule)
+    return schedule
 
 
 def time_shift(mu: float, sigma: float, t: jnp.ndarray):

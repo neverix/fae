@@ -50,7 +50,9 @@ def run_model(wrapped_model, params, ids):
     return wrapped_model(params=params, input_ids=ids).last_hidden_state
 
 class T5EncoderInferencer(object):
-    def __init__(self, mesh, model_name="nev/t5-v1_1-xxl-flax"):
+    def __init__(self, mesh, model_name=None):
+        if model_name is None:
+            model_name = "nev/t5-v1_1-xxl-flax"
         self.mesh = mesh
         self.input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", None))
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
