@@ -9,6 +9,7 @@ from .clip import CLIPInterface
 from .t5 import T5EncoderInferencer
 from .flux_inferencer import DiFormerInferencer
 from .diflayers import DiFormerConfig
+from oryx.core.interpreters.harvest import sow, call_and_reap
 from jax.experimental import mesh_utils
 from loguru import logger
 
@@ -57,7 +58,7 @@ class FluxEnsemble:
         self.flux = DiFormerInferencer(self.mesh, diformer_kwargs=diformer_kwargs)
 
     def sample(self, texts: List[str], width: int = 512, height: int = 512,
-               sample_steps: int = 1):
+               sample_steps: int = 1, debug_mode=False, decode_latents=True):
         n_tokens = width * height / (16 * 16)
         schedule = get_flux_schedule(n_tokens, sample_steps,
                                      shift_time=self.curve_schedule)
@@ -68,31 +69,51 @@ class FluxEnsemble:
         clip_outputs = self.clip(texts)
         logger.info("Encoding text using T5")
         t5_outputs = self.t5(texts)
-        text_input = jax.block_until_ready(self.flux.text_input(
+        text_input = self.flux.text_input(
             clip_emb=clip_outputs, t5_emb=t5_outputs, t5_already_sharded=True, clip_already_sharded=True
-        ))
+        )
         logger.info("Preparing image input")
         prototype = Image.new("RGB", (width, height), (127, 127, 127))
         image_input = self.flux.image_input([prototype] * batch_size,
                                             timesteps=1, guidance_scale=4.0,
                                             key=jax.random.key(5))
         logger.info("Sampling image")
-        denoised = jax.block_until_ready(sample_jit(self.flux, text_input, image_input, schedule))
+        result = sample_jit(self.flux, text_input, image_input, schedule, debug_mode=debug_mode)
+        # man, this would be cleaner as a monad
+        if debug_mode:
+            denoised, reaped = result
+        else:
+            denoised = result
         logger.info("Decoding")
         vae = self.flux.vae
         denoised = denoised.reshape(-1, *denoised.shape[2:])
-        decoded = np.asarray(vae.decode(denoised))
-        for i in range(denoised.shape[0]):
-            yield vae.deprocess(decoded[i:i+1])
+        if decode_latents:
+            decoded = np.asarray(vae.decode(denoised))
+            images = [vae.deprocess(decoded[i:i+1]) for i in range(denoised.shape[0])]
+        else:
+            images = jax.device_put(denoised, jax.devices("cpu")[0])
+        if debug_mode:
+            return images, reaped
+        else:
+            return images
 
 
 @eqx.filter_jit
-def sample_jit(flux, text_input, image_input, schedule):
+def sample_jit(flux, text_input, image_input, schedule, debug_mode=False):
     schedule = schedule[:-1], schedule[1:]
     def sample_step(image_input, timesteps):
         more_noisy, less_noisy = timesteps
-        return flux(text_input, image_input).next_input(more_noisy - less_noisy), None
-    return jax.lax.scan(sample_step, image_input, schedule)[0].encoded
+        flux_result = flux(text_input, image_input, debug_mode=debug_mode)
+        if debug_mode:
+            for k, v in flux_result.reaped.items():
+                sow(v, name=k, tag="reaped", mode="clobber")
+        return flux_result.next_input(more_noisy - less_noisy), None
+    def generate(image_input):
+        return jax.lax.scan(sample_step, image_input, schedule)[0].encoded
+    result, reaped = call_and_reap(generate, tag="reaped")(image_input)
+    if debug_mode:
+        return result, reaped
+    return result
 
 
 def get_flux_schedule(n_seq: int, n_steps: int, shift_time=True):
