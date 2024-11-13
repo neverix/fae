@@ -6,7 +6,9 @@ import torch
 import jax
 
 class CLIPInterface:
-    def __init__(self, mesh, clip_name="openai/clip-vit-large-patch14"):
+    def __init__(self, mesh, clip_name=None):
+        if clip_name is None:
+            clip_name = "openai/clip-vit-large-patch14"
         logger.info("Creating CLIP model")
         self.mesh = mesh
         self.input_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("dp", "fsdp", None))
