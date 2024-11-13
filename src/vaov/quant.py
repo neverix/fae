@@ -366,24 +366,24 @@ def dequantize_vmap(quants, scales, *, use_approx, orig_dtype, mode):
 
     codebook = approx_nf4 if use_approx else nf4
 
-    # group_size = quants.shape[1]
+    group_size = quants.shape[1]
 
-    unquant_matrix = jax.vmap(
-        jax.vmap(dequantize_group, in_axes=(0, 0, None, None, None)),
-        in_axes=(2, 2, None, None, None),
-    )(quants, scales, codebook, orig_dtype, mode)
-    unquant_matrix = unquant_matrix.reshape(-1, quants.shape[2])
+    # unquant_matrix = jax.vmap(
+    #     jax.vmap(dequantize_group, in_axes=(0, 0, None, None, None)),
+    #     in_axes=(2, 2, None, None, None),
+    # )(quants, scales, codebook, orig_dtype, mode)
+    # unquant_matrix = unquant_matrix.reshape(-1, quants.shape[2])
 
-    # grouped = quants.transpose(2, 0, 1).reshape(-1, group_size)
-    # # grouped = quants.reshape(-1, group_size)
-    # scales = scales.transpose(2, 0, 1).reshape(-1)
-    # # scales = scales.reshape(-1)
+    grouped = quants.transpose(2, 0, 1).reshape(-1, group_size)
+    # grouped = quants.reshape(-1, group_size)
+    scales = scales.transpose(2, 0, 1).reshape(-1)
+    # scales = scales.reshape(-1)
 
-    # dequantized_groups = jax.vmap(dequantize_group, in_axes=(0, 0, None, None, None))(
-    #     grouped, scales, codebook, orig_dtype, mode
-    # )
+    dequantized_groups = jax.vmap(dequantize_group, in_axes=(0, 0, None, None, None))(
+        grouped, scales, codebook, orig_dtype, mode
+    )
 
-    # unquant_matrix = dequantized_groups.reshape(quants.shape[2], -1).T
+    unquant_matrix = dequantized_groups.reshape(quants.shape[2], -1).T
 
     return unquant_matrix
 

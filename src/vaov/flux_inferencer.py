@@ -310,7 +310,8 @@ def main():
 
     logger.info("Creating mesh")
     # shape_request = (1, -1, 1)
-    shape_request = (-1, 1, 1)
+    shape_request = (-1, jax.local_device_count(), 1)
+    # shape_request = (-1, 1, 1)
     # shape_request = (2, 2, 1)
     device_count = jax.device_count()
     mesh_shape = np.arange(device_count).reshape(*shape_request).shape
@@ -321,7 +322,7 @@ def main():
     inferencer = DiFormerInferencer(mesh)
     logger.info("Creating inputs")
     # batch_size = device_count
-    batch_size = 48
+    batch_size = 16
     image_inputs = inferencer.image_input(
         [dog_image] * batch_size, timesteps=0.5, key=jax.random.key(1)
     )
@@ -354,19 +355,7 @@ def main():
         )
     )
     print({k: v.shape for k, v in result.reaped.items()})
-
-    def tt(v):
-        if isinstance(v, jnp.ndarray):
-            return torch.from_numpy(np.asarray(v[0, :1].astype(jnp.float32)))
-        return v
-
-    torch.save({k: tt(v) for k, v in result.reaped.items()}, "somewhere/reaped.pt")
-    torch.save(
-        {k: tt(v) for k, v in image_inputs.to_dict().items()},
-        "somewhere/image_inputs.pt",
-    )
-    torch.save({k: tt(v) for k, v in text_inputs.items()}, "somewhere/text_inputs.pt")
-
+    
     logger.info("Saving results")
     vae = inferencer.vae
     denoised = result.denoised[0, :1]

@@ -618,4 +618,7 @@ class SingleStreamBlock(eqx.Module):
         out = data + fg(mod.gate * par_out)
         sow_debug(dict(out=out), "single_out")
         out = fr(out)
+        
+        sow(out, tag="interp", name="single_out", mode="append")
+        
         return out

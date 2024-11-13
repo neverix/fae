@@ -12,9 +12,8 @@ dependencies = [
     "fastapi>=0.115.4",
     "flax>=0.9.0",
     "jax-smi>=1.0.4",
-    "jax[tpu]>=0.4.35",
+    "jax[tpu]>=0.4.34",
     "jaxonnxruntime",
-    "libtpu",
     "libtpu-nightly",
     "loguru>=0.7.2",
     "matplotlib>=3.9.2",
@@ -40,8 +39,7 @@ extra-index-url = ["https://download.pytorch.org/whl/cpu"]
 index-strategy = "first-index"
 
 [tool.uv.sources]
-libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241010+nightly.cleanup-py3-none-any.whl" }
-libtpu = { url = "https://storage.googleapis.com/libtpu-lts-releases/wheels/libtpu/libtpu-0.0.2-py3-none-any.whl" }
+libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" }
 jaxonnxruntime = { path = "jort" }
 oryx = { git = "https://github.com/jax-ml/oryx", rev = "339bc9215962dc998637d53ca8f19a3cea100ec0" }
 
