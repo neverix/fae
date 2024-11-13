@@ -57,7 +57,7 @@ class FluxEnsemble:
         self.flux = DiFormerInferencer(self.mesh, diformer_kwargs=diformer_kwargs)
 
     def sample(self, texts: List[str], width: int = 512, height: int = 512,
-               sample_steps: int = 3):
+               sample_steps: int = 1):
         n_tokens = width * height / (16 * 16)
         schedule = get_flux_schedule(n_tokens, sample_steps,
                                      shift_time=self.curve_schedule)
