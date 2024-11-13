@@ -850,14 +850,10 @@ wheels = [
 [[package]]
 name = "oryx"
 version = "0.2.7"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/jax-ml/oryx?rev=339bc9215962dc998637d53ca8f19a3cea100ec0#339bc9215962dc998637d53ca8f19a3cea100ec0" }
 dependencies = [
     { name = "jax" },
     { name = "tensorflow-probability" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/51/d6/35ed784a053797e5c0d644c589641792be47b95d24b6db7f8bcaeb179eba/oryx-0.2.7.tar.gz", hash = "sha256:6fa1fea1beae126a3d289cdda54c3852934e0587541cc60cbc53a366c6c9c953", size = 140373 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/6e/a06c641e6fd0434dcc7240cebefd9c78436d3fffb06a6f950d84c6f51bda/oryx-0.2.7-py3-none-any.whl", hash = "sha256:f8d3816849fedd5dc208021699223d964caab1f316fe95c8c0e53af68c6bbfbc", size = 206516 },
 ]
 
 [[package]]
@@ -1037,7 +1033,7 @@ wheels = [
 
 [[package]]
 name = "qax"
-version = "0.4.0"
+version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
@@ -1045,9 +1041,9 @@ dependencies = [
     { name = "optax" },
     { name = "plum-dispatch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/77/df/8471853c02d9d8983d399ed8f57a32ee29a7fb6adb4a36baf27ab6c36ed8/qax-0.4.0.tar.gz", hash = "sha256:4c6f62b8acd1f7964f1b80e08f23360c1290b4e4c78ba791b3003027f4317370", size = 27763 }
+sdist = { url = "https://files.pythonhosted.org/packages/40/01/29b08d9c5eac32b0926e50cd72bb3f6045d1da6fc0fc956d8494a7ab0591/qax-0.4.1.tar.gz", hash = "sha256:3626c55deeda82b3cae22b152bbabcba9def3b34d82c3b11b8ef44939f219952", size = 25106 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8c/21/814f5ca097344e1a56fd7c45158d575fa8d0b805cab2ac488bc56643418d/qax-0.4.0-py3-none-any.whl", hash = "sha256:155ed482c5cbcbf22605124d97f237b0ed3b537245f3561a6e7dd4ffdd2b6631", size = 26237 },
+    { url = "https://files.pythonhosted.org/packages/f2/45/3a0b1b4de25f1c5fa8cca31a37355e27e3f7807bffe1a3b8ad0f5a952c58/qax-0.4.1-py3-none-any.whl", hash = "sha256:1c6f15d59a2756cf3efda9d55bf07a3e6bd3782e4e336a3ea917c0daf71e8d76", size = 22162 },
 ]
 
 [[package]]
@@ -1500,8 +1496,8 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.9.2" },
     { name = "onnx", specifier = ">=1.17.0" },
     { name = "orbax", specifier = ">=0.1.9" },
-    { name = "oryx", specifier = ">=0.2.7" },
-    { name = "qax", specifier = ">=0.4.0" },
+    { name = "oryx", git = "https://github.com/jax-ml/oryx?rev=339bc9215962dc998637d53ca8f19a3cea100ec0" },
+    { name = "qax", specifier = ">=0.4.1" },
     { name = "sentencepiece", specifier = ">=0.2.0" },
     { name = "torch", specifier = ">=2.4.1" },
     { name = "transformers", specifier = ">=4.44.2" },

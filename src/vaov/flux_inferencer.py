@@ -134,14 +134,27 @@ class ImageOutput(DotDict):
         )
 
 
-@partial(jax.jit, static_argnums=(1,), static_argnames=("debug_mode",))
+@partial(jax.jit, static_argnums=(1,), static_argnames=("debug_mode", "debug_interp"))
 @qax.use_implicit_args
-def run_model_(weights, logic, kwargs, debug_mode=False):
-    model = eqx.combine(weights, logic)
-    results = call_and_reap(model, tag="debug")(**kwargs)
+def run_model_(weights, logic, kwargs, debug_mode=False, debug_interp=True):
+    def caller(kwargs):
+        model = eqx.combine(weights, logic)
+        return model(**kwargs)
+    if debug_interp:
+        results, aux = call_and_reap(caller, tag="interp")(kwargs)
+    else:
+        results, aux = call_and_reap(caller, tag="debug")(kwargs)
     if debug_mode:
-        return results
-    return results[0]
+        return results, aux
+    return results
+    
+    (results, debug_results), interp_results = results
+    if debug_mode:
+        if debug_interp:
+            return results, interp_results
+        else:
+            return results, debug_results
+    return results
 
 
 class DiFormerInferencer(eqx.Module):
@@ -193,7 +206,7 @@ class DiFormerInferencer(eqx.Module):
         weights = jax.tree.map(to_mesh, weights, is_leaf=is_arr)
         self.weights, self.logic = weights, logic
 
-    def __call__(self, text_inputs, image_inputs, debug_mode=False):
+    def __call__(self, text_inputs, image_inputs, debug_mode=False, debug_interp=True):
         img, timesteps, img_ids, guidance_scale, h, w = [
             image_inputs[k]
             for k in ("patched", "timesteps", "img_ids", "guidance_scale", "h", "w")
@@ -207,7 +220,8 @@ class DiFormerInferencer(eqx.Module):
             img_ids=img_ids,
             guidance=guidance_scale,
         )
-        results = run_model_(self.weights, self.logic, kwargs, debug_mode=debug_mode)
+        results = run_model_(self.weights, self.logic, kwargs,
+                             debug_mode=debug_mode, debug_interp=debug_interp)
         reaped = None
         if debug_mode:
             patched, reaped = results
@@ -296,7 +310,8 @@ def main():
 
     logger.info("Creating mesh")
     # shape_request = (1, -1, 1)
-    shape_request = (-1, 1, 1)
+    shape_request = (-1, jax.local_device_count(), 1)
+    # shape_request = (-1, 1, 1)
     # shape_request = (2, 2, 1)
     device_count = jax.device_count()
     mesh_shape = np.arange(device_count).reshape(*shape_request).shape
@@ -307,7 +322,7 @@ def main():
     inferencer = DiFormerInferencer(mesh)
     logger.info("Creating inputs")
     # batch_size = device_count
-    batch_size = 48
+    batch_size = 16
     image_inputs = inferencer.image_input(
         [dog_image] * batch_size, timesteps=0.5, key=jax.random.key(1)
     )
@@ -319,7 +334,6 @@ def main():
     logger.info("Running model")
     result = jax.block_until_ready(inferencer(text_inputs, image_inputs))
     logger.info("Running model for debug")
-    return
     result = jax.block_until_ready(inferencer(text_inputs, image_inputs, debug_mode=True))
 
     logger.info("Comparing results")
@@ -341,19 +355,7 @@ def main():
         )
     )
     print({k: v.shape for k, v in result.reaped.items()})
-
-    def tt(v):
-        if isinstance(v, jnp.ndarray):
-            return torch.from_numpy(np.asarray(v[0, :1].astype(jnp.float32)))
-        return v
-
-    torch.save({k: tt(v) for k, v in result.reaped.items()}, "somewhere/reaped.pt")
-    torch.save(
-        {k: tt(v) for k, v in image_inputs.to_dict().items()},
-        "somewhere/image_inputs.pt",
-    )
-    torch.save({k: tt(v) for k, v in text_inputs.items()}, "somewhere/text_inputs.pt")
-
+    
     logger.info("Saving results")
     vae = inferencer.vae
     denoised = result.denoised[0, :1]

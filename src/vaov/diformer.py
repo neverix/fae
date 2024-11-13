@@ -3,7 +3,6 @@ import equinox as eqx
 from equinox import nn
 import jax.experimental
 import jax.experimental.shard_map
-import qax.quantization
 from safetensors.numpy import load_file
 from functools import partial
 from collections import defaultdict
@@ -12,6 +11,7 @@ from jaxtyping import Array, Float, UInt
 from typing import Optional
 from .quant import QuantMatrix
 from .quant_loading import load_thing, save_thing
+from oryx.core import sow
 import qax.primitives
 import qax
 import jax.numpy as jnp
@@ -58,10 +58,6 @@ class SequentialScan(eqx.Module, Generic[T]):
             return layer(carry, *args, **kwargs), None
 
         return jax.lax.scan(scan_fn, x, self.weights)[0]
-
-    def call_first(self, x, *args, **kwargs):
-        layer = eqx.combine(jax.tree.map(lambda x: x[0], self.weights), self.logic)
-        return layer(x, *args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self.weights, name)
@@ -185,23 +181,17 @@ class DiFormer(eqx.Module):
         mask = jnp.concatenate((txt_mask, img_mask), -1)
         data = dict(img=img, txt=txt)
         sow_debug(dict(img=img, txt=txt, vec=vec, pe=pe, mask=mask), "pre_double")
-        
-        # is not actually called if we don't reap
-        first_double = self.double_blocks.call_first(
-            data, vec=vec, pe=pe, mask=mask, debug_first=True
-        )
-        sow_debug(first_double, "first_double")
+        sow(img, tag="interp", name="img_proj")
+        sow(txt, tag="interp", name="txt_proj")
+        sow(vec, tag="interp", name="vec_proj")
+        sow(pe, tag="interp", name="pe")
+        sow(mask, tag="interp", name="mask")
         
         data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
 
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
         sow_debug(dict(data=data), "pre_single")
-        
-        first_single = self.single_blocks.call_first(
-            data, vec=vec, pe=pe, mask=mask, debug_first=True
-        )
-        sow_debug(first_single, "first_single")
         
         data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
         img = data[..., txt.shape[-2]:, :]

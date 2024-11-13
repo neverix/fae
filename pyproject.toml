@@ -20,7 +20,7 @@ dependencies = [
     "onnx>=1.17.0",
     "orbax>=0.1.9",
     "oryx>=0.2.7",
-    "qax>=0.4.0",
+    "qax>=0.4.1",
     "sentencepiece>=0.2.0",
     "torch>=2.4.1",
     "transformers>=4.44.2",
@@ -41,6 +41,7 @@ index-strategy = "first-index"
 [tool.uv.sources]
 libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" }
 jaxonnxruntime = { path = "jort" }
+oryx = { git = "https://github.com/jax-ml/oryx", rev = "339bc9215962dc998637d53ca8f19a3cea100ec0" }
 
 [tool.ruff.lint]
 ignore = ["F722"]
