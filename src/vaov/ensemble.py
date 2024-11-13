@@ -55,9 +55,9 @@ class FluxEnsemble:
             yield vae.deprocess(decoded[i:i+1])
 
 
-@partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
-def sample_jit(flux_logic, flux_weigths, text_input, image_input, schedule):
-    flux = eqx.combine(flux_logic, flux_weigths)
+@eqx.filter_jit
+def sample_jit(flux, text_input, image_input, schedule):
+    schedule = schedule[:-1], schedule[1:]
     def sample_step(image_input, timesteps):
         more_noisy, less_noisy = timesteps
         return flux(text_input, image_input).next_input(more_noisy - less_noisy), None
@@ -87,5 +87,5 @@ def mu_estimator(n_seq: int):
 
 if __name__ == "__main__":
     ensemble = FluxEnsemble()
-    for i, img in enumerate(ensemble.sample("A mystic cat with a sign that says hello world!")):
+    for i, img in enumerate(ensemble.sample(["A mystic cat with a sign that says hello world!"] * 4)):
         img.save(f"somewhere/sample_{i}.png")

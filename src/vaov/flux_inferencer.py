@@ -144,7 +144,12 @@ def run_model_(weights, logic, kwargs, debug_mode=False):
     return results[0]
 
 
-class DiFormerInferencer:
+class DiFormerInferencer(eqx.Module):
+    mesh: jax.sharding.Mesh = eqx.field(static=True)
+    vae: FluxVAE
+    logic: DiFormer
+    weights: DiFormer
+    
     def __init__(
         self,
         mesh,
