@@ -1,6 +1,6 @@
 import jax
 import equinox as eqx
-from functools import partial
+from dataclasses import replace
 from typing import List
 import jax.numpy as jnp
 import numpy as np
@@ -8,6 +8,7 @@ from PIL import Image
 from .clip import CLIPInterface
 from .t5 import T5EncoderInferencer
 from .flux_inferencer import DiFormerInferencer
+from .diflayers import DiFormerConfig
 from jax.experimental import mesh_utils
 from loguru import logger
 
@@ -30,6 +31,10 @@ class FluxEnsemble:
                 "black-forest-labs/FLUX.1-schnell",
                 "flux1-schnell.safetensors",
             )
+            diformer_kwargs["custom_config"] = replace(
+                DiFormerConfig(),
+                guidance_embed=False
+            )
         logger.info("Creating mesh")
         self.curve_schedule = curve_schedule
         if use_fsdp:
@@ -42,14 +47,17 @@ class FluxEnsemble:
         physical_mesh = mesh_utils.create_device_mesh(mesh_shape)
         self.mesh = jax.sharding.Mesh(physical_mesh, ("dp", "fsdp", "tp"))
         
+        logger.info("Creating CLIP")
         self.clip = CLIPInterface(self.mesh, clip_name=clip_name)
+        logger.info("Creating T5")
         self.t5 = T5EncoderInferencer(self.mesh, model_name=t5_name)
+        logger.info("Creating Flux")
         if diformer_kwargs is None:
             diformer_kwargs = {}
         self.flux = DiFormerInferencer(self.mesh, diformer_kwargs=diformer_kwargs)
 
     def sample(self, texts: List[str], width: int = 512, height: int = 512,
-               sample_steps: int = 4):
+               sample_steps: int = 3):
         n_tokens = width * height / (16 * 16)
         schedule = get_flux_schedule(n_tokens, sample_steps,
                                      shift_time=self.curve_schedule)
