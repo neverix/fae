@@ -35,7 +35,7 @@ class SAEConfig:
     dead_after: int = 1_000
 
     batch_size: int = 4
-    seq_len: int = 512
+    seq_len: int = 1024
     n_steps: int = 1_000
     wandb_name: tuple[str, str] = ("neverix", "vaov")
 
@@ -184,8 +184,7 @@ class SAE(eqx.Module):
 
     def __call__(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
         info = jax.lax.stop_gradient(self.info)
-        # x_normed = info.norm(x)
-        x_normed = x
+        x_normed = info.norm(x)
         encodings = (x_normed - self.b_pre) @ self.W_enc
         weights, indices = jax.lax.approx_max_k(encodings, self.config.k)
         decoded = sparse_matmul(weights, indices, self.W_dec)
@@ -354,7 +353,8 @@ class SAETrainer(eqx.Module):
             "W_enc_norm": self.sae_logic.info.weight_norms["W_enc"],
             "W_dec_norm": self.sae_logic.info.weight_norms["W_dec"],
             "W_enc_grad_norm": self.sae_logic.info.weight_grad_norms["W_enc"],
-            "W_dec_grad_norm": self.sae_logic.info.weight_grad_norms["W_dec"]
+            "W_dec_grad_norm": self.sae_logic.info.weight_grad_norms["W_dec"],
+            "tokens_processed": self.sae_logic.info.n_steps * self.config.full_batch_size
         }
 
 
@@ -379,11 +379,12 @@ def main():
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("k-mktr/improved-flux-prompts")
     prompts_iterator = prompts_dataset["train"]["prompt"]
+    logger.info("Creating Flux")
+    ensemble = FluxEnsemble(use_schnell=True, use_fsdp=True)
     logger.info("Creating SAE trainer")
     config = SAEConfig()
     sae_trainer = SAEOverseer(config)
-    ensemble = FluxEnsemble(use_schnell=True, use_fsdp=True)
-    width_height_product = config.seq_len * (16 * 16)
+    width_height_product = config.seq_len // 2 * (16 * 16)
     width_and_height = math.isqrt(width_height_product)
     for batch_idx, prompts in enumerate(chunked(prompts_iterator, config.batch_size)):
         key = jax.random.key(batch_idx)
