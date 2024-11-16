@@ -185,7 +185,7 @@ class SAE(eqx.Module):
     def __call__(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
         info = jax.lax.stop_gradient(self.info)
         x_normed = info.norm(x)
-        encodings = (x_normed - self.b_pre) @ self.W_enc
+        encodings = (x_normed - self.b_post - self.b_pre) @ self.W_enc
         weights, indices = jax.lax.approx_max_k(encodings, self.config.k)
         decoded = sparse_matmul(weights, indices, self.W_dec)
         y_normed = decoded + self.b_post
@@ -230,11 +230,17 @@ class SAE(eqx.Module):
     
     def apply_updates(self, updates: "SAE", grads: "SAE", past_output: SAEOutput) -> "SAE":
         updated = eqx.apply_updates(self, updates)
-        updated = eqx.tree_at(lambda x: x.b_pre, updated, replace_fn=lambda b_pre:
-            jnp.where(self.info.n_steps > 0, b_pre, -past_output.x_normed.mean(axis=0)))
+        updated = eqx.tree_at(
+            lambda x: x.b_post,
+            updated,
+            replace_fn=lambda b_post: jnp.where(
+                self.info.n_steps > 1, b_post, past_output.x_normed.mean(axis=0)
+            ),
+        )
         updated = eqx.tree_at(lambda x: x.W_dec, updated,
                               replace_fn=lambda W_dec: W_dec / jnp.linalg.norm(W_dec, axis=-1, keepdims=True))
-        updated = eqx.tree_at(lambda x: x.info, updated, replace_fn=lambda info: info.step(updated, updates, grads, past_output))
+        updated = eqx.tree_at(lambda x: x.info, updated,
+                              replace_fn=lambda info: info.step(updated, updates, grads, past_output))
         return updated
 
     def split(self):
@@ -253,6 +259,9 @@ class SAE(eqx.Module):
             b_post=P(None),
             info=SAEInfo.pspec(config),
         )
+
+def hist(x):
+    return wandb.Histogram(x.tolist())
 
 class SAETrainer(eqx.Module):
     config: SAEConfig
@@ -324,7 +333,7 @@ class SAETrainer(eqx.Module):
         sae = eqx.combine(self.sae_params, self.sae_logic)
         sae_grad = sae.process_gradients(sae_grad)
         updates, optimizer_state = self.optimizer.update(sae_grad, self.optimizer_state, self.sae_params)
-        start_updating = self.sae_logic.info.n_steps > 0
+        start_updating = self.sae_logic.info.n_steps > 1
         updates = jax.tree.map(
             lambda u: jnp.where(start_updating, u, 0),
             updates)
@@ -346,8 +355,8 @@ class SAETrainer(eqx.Module):
             "aux_k_loss": sae_outputs.losses["aux_k_loss"].mean(),
             "loss": sae_outputs.loss.mean(),
             "grad_clip_percent": self.sae_logic.info.grad_clip_percent,
-            "feature_density": wandb.Histogram(self.sae_logic.info.feature_density.tolist()),
-            "activated_in": wandb.Histogram(self.sae_logic.info.activated_in.tolist()),
+            "feature_density": hist(self.sae_logic.info.feature_density),
+            "activated_in": hist(self.sae_logic.info.activated_in),
             "data_norm": self.sae_logic.info.avg_norm,
             "fvu": sae_outputs.fvu.mean(),
             "W_enc_norm": self.sae_logic.info.weight_norms["W_enc"],
