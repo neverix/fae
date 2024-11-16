@@ -22,21 +22,20 @@ import sys
 
 @dataclass(frozen=True)
 class SAEConfig:
-    d_model: int = 2048
-    n_features: int = 32768
+    d_model: int = 3072
+    n_features: int = 32768 * 2
     
     param_dtype: jax.typing.DTypeLike = jnp.bfloat16
     bias_dtype: jax.typing.DTypeLike = jnp.float32
     
-    k: int = 64
-    aux_k: int = 32
-    aux_k_after: int = 256
+    k: int = 128
+    aux_k: int = 128
     aux_k_coeff: float = 1/32
     dead_after: int = 1_000
 
     batch_size: int = 4
-    seq_len: int = 1024
-    n_steps: int = 1_000
+    seq_len: int = 768
+    n_steps: int = 100_000
     wandb_name: tuple[str, str] = ("neverix", "vaov")
 
     tp_size: int = jax.local_device_count()
@@ -64,6 +63,7 @@ class SAEOutput(eqx.Module):
     losses: dict[str, Float[Array, "batch_size"]]
     loss: Float[Array, "batch_size"]
     fvu: Float[Array, "batch_size"]
+    var_explained: Float[Array, ""]
 
 
 class SAEInfo(eqx.Module):
@@ -83,7 +83,7 @@ class SAEInfo(eqx.Module):
             n_steps=jnp.zeros(()),
             avg_norm=jnp.ones(()),
             feature_density=jnp.zeros((config.n_features,)),
-            activated_in=jnp.zeros((config.n_features,)),
+            activated_in=jnp.zeros((config.n_features,), dtype=jnp.uint32),
             grad_clip_percent=jnp.zeros(()),
             weight_norms=dict(W_enc=jnp.linalg.norm(W_enc), W_dec=jnp.linalg.norm(W_enc.T)),
             weight_grad_norms=dict(W_enc=jnp.zeros(()), W_dec=jnp.zeros(()))
@@ -144,8 +144,9 @@ class SAEInfo(eqx.Module):
         )
 
 
-SPARSE_MATMUL_BATCH_PER_FEATURE = 1
-def sparse_matmul(
+SPARSE_MATMUL_MAX_BATCH = 32768
+@jax.remat
+def sparse_matmul_scan(
     weights: Float[Array, "batch_size k"],
     indices: UInt[Array, "batch_size k"],
     W: Float[Array, "n_features d_model"]) -> Float[Array, "batch_size d_model"]:
@@ -153,7 +154,20 @@ def sparse_matmul(
         weights, indices = wi
         return (weights[:, None] * W[indices]).sum(0)
     return jax.lax.map(sparse_matmul_basic, (weights, indices),
-                       batch_size=SPARSE_MATMUL_BATCH_PER_FEATURE * weights.shape[-1])
+                       batch_size=SPARSE_MATMUL_MAX_BATCH // weights.shape[-1])
+
+
+def sparse_matmul(
+    weights: Float[Array, "batch_size k"],
+    indices: UInt[Array, "batch_size k"],
+    W: Float[Array, "n_features d_model"]) -> Float[Array, "batch_size d_model"]:
+    if weights.shape != indices.shape:
+        raise ValueError("Weights and indices must have the same shape")
+    weights = weights.astype(jnp.bfloat16)
+    indices = indices.astype(jnp.uint32)
+    if weights.ndim > 2:
+        return jax.vmap(sparse_matmul, in_axes=(0, 0, None), out_axes=0)(weights, indices, W)
+    return sparse_matmul_scan(weights, indices, W)
 
 class SAE(eqx.Module):
     config: SAEConfig = eqx.field(static=True)
@@ -201,11 +215,16 @@ class SAE(eqx.Module):
         dead_indices = jnp.broadcast_to(dead_indices, dead_weights.shape)
         aux_y_normed = sparse_matmul(dead_weights, dead_indices, self.W_dec) + self.b_post
         aux_k_loss = jnp.mean(jnp.square(x_normed - aux_y_normed), axis=-1)
-        aux_k_loss = jnp.where(info.n_steps >= self.config.aux_k_after, aux_k_loss, 0)
+        aux_k_loss = jnp.where(info.n_steps >= self.config.dead_after, aux_k_loss, 0)
         
         loss = recon_loss + self.config.aux_k_coeff * aux_k_loss
         
         fvu = jnp.mean(jnp.square(x_normed - y_normed)) / jnp.mean(jnp.square(x_normed))
+        var_explained = jnp.square(
+            ((y_normed - y_normed.mean(axis=0)) / (y_normed.std(axis=0) + 1e-8)
+            * (x_normed - x_normed.mean(axis=0)) / (x_normed.std(axis=0) + 1e-8)
+            ).mean(0)
+        ).mean()
         
         return SAEOutput(
             x_normed=x_normed,
@@ -219,7 +238,8 @@ class SAE(eqx.Module):
                 aux_k_loss=aux_k_loss
             ),
             loss=loss,
-            fvu=fvu
+            fvu=fvu,
+            var_explained=var_explained
         )
     
     def process_gradients(self, grads: "SAE") -> "SAE":
@@ -261,7 +281,7 @@ class SAE(eqx.Module):
         )
 
 def hist(x):
-    return wandb.Histogram(x.tolist())
+    return wandb.Histogram(np.asarray(x.flatten().astype(jnp.float32).tolist()))
 
 class SAETrainer(eqx.Module):
     config: SAEConfig
@@ -359,6 +379,7 @@ class SAETrainer(eqx.Module):
             "activated_in": hist(self.sae_logic.info.activated_in),
             "data_norm": self.sae_logic.info.avg_norm,
             "fvu": sae_outputs.fvu.mean(),
+            "var_explained": sae_outputs.var_explained,
             "W_enc_norm": self.sae_logic.info.weight_norms["W_enc"],
             "W_dec_norm": self.sae_logic.info.weight_norms["W_dec"],
             "W_enc_grad_norm": self.sae_logic.info.weight_grad_norms["W_enc"],
@@ -378,9 +399,15 @@ class SAEOverseer:
 
     def step(self, x: Float[Array, "batch_size d_model"]) -> SAEOutput:
         self.sae_trainer, sae_outputs = self.sae_trainer.step(x)
-        self.run.log(self.sae_trainer.log_dict(sae_outputs))
+        log_dict = self.sae_trainer.log_dict(sae_outputs)
+        pure_log_dict = {k: v for k, v in log_dict.items() if not isinstance(v, wandb.Histogram)}
+        histograms = {k: v for k, v in log_dict.items() if isinstance(v, wandb.Histogram)}
+        step = int(self.sae_trainer.sae_logic.info.n_steps)
+        self.run.log(pure_log_dict, step=step)
+        for k, v in histograms.items():
+            self.run.log({k: v}, step=step)
         self.bar.update()
-        self.bar.set_postfix(self.sae_trainer.log_dict(sae_outputs))
+        self.bar.set_postfix(pure_log_dict)
         return sae_outputs
 
 
@@ -393,23 +420,34 @@ def main():
     logger.info("Creating SAE trainer")
     config = SAEConfig()
     sae_trainer = SAEOverseer(config)
-    width_height_product = config.seq_len // 2 * (16 * 16)
+    width_height_product = (config.seq_len - 512) * (16 * 16)
     width_and_height = math.isqrt(width_height_product)
-    for batch_idx, prompts in enumerate(chunked(prompts_iterator, config.batch_size)):
+    appeared_prompts = set()
+    cycle_detected = False
+    for batch_idx, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
+        if not cycle_detected:
+            new_prompts = set(prompts)
+            if new_prompts & appeared_prompts:
+                cycle_detected = True
+                logger.warning("Cycle detected")
+            appeared_prompts |= new_prompts
         key = jax.random.key(batch_idx)
         logger.remove()
         images, reaped = ensemble.sample(
             prompts,
             debug_mode=True,
-            decode_latents=False,
+            decode_latents=True,
             sample_steps=1,
             key=key,
             width=width_and_height,
             height=width_and_height
         )
+        for i, image in enumerate(images):
+            image.save(f"somewhere/samples/{i}.png")
         logger.add(sys.stderr, level="INFO")
-        training_data = reaped["double_img"][-1]
-        training_data = training_data.astype(jnp.bfloat16).reshape(-1, 2048)
+        training_data = jnp.concatenate((reaped["double_img"][-1], reaped["double_txt"][-1]), axis=-2)
+        training_data = training_data.astype(jnp.bfloat16).reshape(-1, training_data.shape[-1])
+        assert training_data.shape == (config.full_batch_size, config.d_model)
         for v in reaped.values():
             v.delete()
         sae_trainer.step(training_data)
