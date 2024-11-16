@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 from .clip import CLIPInterface
 from .t5 import T5EncoderInferencer
-from .flux_inferencer import DiFormerInferencer, random_or
+from .flux_inferencer import FluxInferencer, random_or
 from .diflayers import DiFormerConfig
 from oryx.core.interpreters.harvest import sow, call_and_reap
 from jax.experimental import mesh_utils
@@ -55,7 +55,7 @@ class FluxEnsemble:
         logger.info("Creating Flux")
         if diformer_kwargs is None:
             diformer_kwargs = {}
-        self.flux = DiFormerInferencer(self.mesh, diformer_kwargs=diformer_kwargs)
+        self.flux = FluxInferencer(self.mesh, diformer_kwargs=diformer_kwargs)
 
     def sample(self, texts: List[str], width: int = 512, height: int = 512,
                sample_steps: int = 1, debug_mode=False, decode_latents=True,

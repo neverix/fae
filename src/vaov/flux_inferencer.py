@@ -157,7 +157,7 @@ def run_model_(weights, logic, kwargs, debug_mode=False, debug_interp=True):
     return results
 
 
-class DiFormerInferencer(eqx.Module):
+class FluxInferencer(eqx.Module):
     mesh: jax.sharding.Mesh = eqx.field(static=True)
     vae: FluxVAE
     logic: DiFormer
@@ -319,7 +319,7 @@ def main():
     mesh = jax.sharding.Mesh(physical_mesh, ("dp", "fsdp", "tp"))
 
     logger.info("Creating inferencer")
-    inferencer = DiFormerInferencer(mesh)
+    inferencer = FluxInferencer(mesh)
     logger.info("Creating inputs")
     # batch_size = device_count
     batch_size = 16
