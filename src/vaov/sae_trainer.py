@@ -18,12 +18,19 @@ import wandb
 import math
 import jax
 import sys
+import os
+import json
+from pathlib import Path
+import orbax.checkpoint as ocp
+from typing import Sequence, Optional, List
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
 
 
 @dataclass(frozen=True)
 class SAEConfig:
     d_model: int = 3072
-    n_features: int = 32768 * 2
+    n_features: int = 65536
     
     param_dtype: jax.typing.DTypeLike = jnp.float32
     bias_dtype: jax.typing.DTypeLike = jnp.float32
@@ -52,6 +59,42 @@ class SAEConfig:
     @property
     def full_batch_size(self):
         return self.batch_size * self.seq_len
+
+
+class SAEConfigHandler(ocp.type_handlers.TypeHandler):
+    def __init__(self):
+        self._executor = ThreadPoolExecutor(max_workers=1)
+    
+    def typestr(self):
+        return "SAEConfig"
+    
+    async def metadata(self, infos: Sequence[ocp.type_handlers.ParamInfo]):
+        return [ocp.metadata.Metadata(name=info.name, directory=info.path) for info in infos]
+    
+    async def serialize(self, values, infos, args = None):
+        futures = []
+        for value, info in zip(values, infos):
+            info.path.mkdir(exist_ok=True)
+            futures.append(
+                self._executor.submit(
+                    lambda: json.dump(value.__dict__, open(info.path / "config.json", "w"))
+                )
+            )
+        return futures
+    
+    async def deserialize(self, infos, args = None):
+        del args
+        futures = []
+        for info in infos:
+            futures.append(
+                self._executor.submit(
+                    lambda: SAEConfig(**json.load(open(info.path / "config.json")))
+                )
+            )
+        return await asyncio.gather(*futures)
+
+
+ocp.type_handlers.register_type_handler(SAEConfig, SAEConfigHandler(), override=True)
 
 
 class SAEOutput(eqx.Module):
@@ -228,11 +271,15 @@ class SAE(eqx.Module):
         loss = recon_loss + self.config.aux_k_coeff * aux_k_loss
         
         fvu = jnp.mean(jnp.square(x_normed - y_normed)) / jnp.mean(jnp.square(x_normed))
-        var_explained = jnp.square(
-            ((y_normed - y_normed.mean(axis=0)) / (y_normed.std(axis=0) + 1e-8)
-            * (x_normed - x_normed.mean(axis=0)) / (x_normed.std(axis=0) + 1e-8)
-            ).mean(0)
-        ).mean()
+        # var_explained = jnp.square(
+        #     ((y_normed - y_normed.mean(axis=0)) / (y_normed.std(axis=0) + 1e-8)
+        #     * (x_normed - x_normed.mean(axis=0)) / (x_normed.std(axis=0) + 1e-8)
+        #     ).mean(0)
+        # ).mean()
+        correlation = ((x_normed - x_normed.mean(axis=0)) * (y_normed - y_normed.mean(axis=0))).mean(axis=0)
+        var_explained = jnp.square(correlation) / (
+            jnp.var(x_normed, axis=0) * jnp.var(y_normed, axis=0)
+        )
         
         return SAEOutput(
             x_normed=x_normed,
@@ -295,7 +342,6 @@ class SAETrainer(eqx.Module):
     config: SAEConfig
     sae_params: SAE
     sae_logic: SAE
-    mesh: jax.sharding.Mesh
     ema: SAE
     optimizer: optax.GradientTransformation
     optimizer_state: SAE
@@ -337,7 +383,6 @@ class SAETrainer(eqx.Module):
         
         return cls(
             config=config,
-            mesh=mesh,
             sae_params=sae_params,
             sae_logic=sae_logic,
             ema=ema,
@@ -397,13 +442,31 @@ class SAETrainer(eqx.Module):
 
 
 class SAEOverseer:
-    def __init__(self, config: SAEConfig):
+    def __init__(self, config: SAEConfig, save_at="somewhere/sae_mid", save_every=1000, restore=False):
         self.config = config
         self.key = jax.random.PRNGKey(0)
         self.sae_trainer = SAETrainer.create(config, self.key)
-        self.bar = tqdm(total=config.n_steps)
+
         if config.wandb_name:
-            self.run = wandb.init(entity=config.wandb_name[0], project=config.wandb_name[1], config=config)
+            self.run = wandb.init(
+                entity=config.wandb_name[0], project=config.wandb_name[1], config=config
+            )
+        self.bar = tqdm(total=config.n_steps)
+        
+        self.save_at = None
+        if save_at:
+            save_at = Path(save_at).resolve()
+            if not restore:
+                save_at = ocp.test_utils.erase_and_create_empty(save_at)
+            self.save_at = save_at
+            options = ocp.CheckpointManagerOptions(max_to_keep=1, save_interval_steps=save_every)
+            self.mngr = ocp.CheckpointManager(
+                save_at,
+                ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
+                options=options,
+            )
+            if restore:
+                self.restore()
 
     def step(self, x: Float[Array, "batch_size d_model"]) -> SAEOutput:
         self.sae_trainer, sae_outputs = self.sae_trainer.step(x)
@@ -416,7 +479,38 @@ class SAEOverseer:
             self.run.log({k: v}, step=step)
         self.bar.update()
         self.bar.set_postfix(pure_log_dict)
+        if self.save_at:
+            self.save(step)
         return sae_outputs
+    
+    def save(self, step: int):
+        save_dict = dict(
+            sae_params=self.sae_trainer.sae_params,
+            info=self.sae_trainer.sae_logic.info,
+            ema=self.sae_trainer.ema,
+            optimizer_state=self.sae_trainer.optimizer_state
+        )
+        self.mngr.save(step, save_dict)
+        
+    
+    def restore(self):
+        save_dict = self.mngr.restore(
+            self.mngr.latest_step(),
+            items=dict(
+                sae_params=self.sae_trainer.sae_params,
+                info=self.sae_trainer.sae_logic.info,
+                ema=self.sae_trainer.ema,
+                optimizer_state=self.sae_trainer.optimizer_state
+            ),
+        )
+        self.sae_trainer = replace(self.sae_trainer,
+                                    sae_params=save_dict["sae_params"],
+                                    sae_logic=eqx.tree_at(lambda x: x.info, self.sae_trainer.sae_logic,
+                                                         save_dict["info"]),
+                                    ema=save_dict["ema"],
+                                    optimizer_state=save_dict["optimizer_state"])
+        self.bar.n = int(self.sae_trainer.sae_logic.info.n_steps)
+        self.bar.last_print_n = int(self.sae_trainer.sae_logic.info.n_steps)
 
 
 def main():
@@ -427,12 +521,19 @@ def main():
     ensemble = FluxEnsemble(use_schnell=True, use_fsdp=True)
     logger.info("Creating SAE trainer")
     config = SAEConfig()
-    sae_trainer = SAEOverseer(config)
+    sae_trainer = SAEOverseer(
+        config,
+        save_every=500,
+        restore="somewhere/sae_mid",
+    )
     width_height_product = (config.seq_len - 512) * (16 * 16)
     width_and_height = math.isqrt(width_height_product)
     appeared_prompts = set()
     cycle_detected = False
     for batch_idx, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
+        if len(prompts) < config.batch_size:
+            logger.warning("End of dataset")
+            continue
         if not cycle_detected:
             new_prompts = set(prompts)
             if new_prompts & appeared_prompts:
