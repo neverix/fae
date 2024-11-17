@@ -25,8 +25,9 @@ class SAEConfig:
     d_model: int = 3072
     n_features: int = 32768 * 2
     
-    param_dtype: jax.typing.DTypeLike = jnp.bfloat16
+    param_dtype: jax.typing.DTypeLike = jnp.float32
     bias_dtype: jax.typing.DTypeLike = jnp.float32
+    clip_data: float = 64.0
     
     k: int = 128
     aux_k: int = 128
@@ -89,11 +90,15 @@ class SAEInfo(eqx.Module):
             weight_grad_norms=dict(W_enc=jnp.zeros(()), W_dec=jnp.zeros(()))
         )
     
+    @property
+    def tgt_norm(self):
+        return math.sqrt(self.config.d_model)
+    
     def norm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
-        return x / self.avg_norm * math.sqrt(self.config.d_model)
+        return x / self.avg_norm * self.tgt_norm
 
     def denorm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
-        return x * self.avg_norm / math.sqrt(self.config.d_model)
+        return x / self.tgt_norm * self.avg_norm
 
     def step(self, sae: "SAE", grads: "SAE", updates: "SAE", outputs: SAEOutput):
         weighting_factor, new_weighting_factor = self.n_steps / (self.n_steps + 1), 1 / (self.n_steps + 1)
@@ -163,8 +168,6 @@ def sparse_matmul(
     W: Float[Array, "n_features d_model"]) -> Float[Array, "batch_size d_model"]:
     if weights.shape != indices.shape:
         raise ValueError("Weights and indices must have the same shape")
-    weights = weights.astype(jnp.bfloat16)
-    indices = indices.astype(jnp.uint32)
     if weights.ndim > 2:
         return jax.vmap(sparse_matmul, in_axes=(0, 0, None), out_axes=0)(weights, indices, W)
     return sparse_matmul_scan(weights, indices, W)
@@ -199,6 +202,11 @@ class SAE(eqx.Module):
     def __call__(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
         info = jax.lax.stop_gradient(self.info)
         x_normed = info.norm(x)
+        x_normed = jnp.clip(
+            x_normed,
+            -self.config.clip_data,
+            self.config.clip_data,
+        )
         encodings = (x_normed - self.b_post - self.b_pre) @ self.W_enc
         weights, indices = jax.lax.approx_max_k(encodings, self.config.k)
         decoded = sparse_matmul(weights, indices, self.W_dec)
