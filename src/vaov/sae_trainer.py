@@ -32,6 +32,8 @@ class SAEConfig:
     d_model: int = 3072
     n_features: int = 65536
     
+    do_update: bool = True
+    
     param_dtype: jax.typing.DTypeLike = jnp.float32
     bias_dtype: jax.typing.DTypeLike = jnp.float32
     clip_data: float = 64.0
@@ -81,13 +83,13 @@ class SAEConfig:
     ) -> Float[Array, "full_batch_size d_model"]:
         training_data = training_data.astype(jnp.bfloat16)
         if self.seq_mode == "txt":
-            x = training_data[..., :512, :]
+            training_data = training_data[..., :512, :]
         elif self.seq_mode == "img":
-            x = training_data[..., 512:, :]
+            training_data = training_data[..., 512:, :]
         
         training_data = training_data.reshape(-1, training_data.shape[-1])
         assert training_data.shape == (self.full_batch_size, self.d_model)
-        return x.reshape(self.batch_size, self.seq_len, self.d_model)
+        return training_data
 
 
 class SAEConfigHandler(ocp.type_handlers.TypeHandler):
@@ -184,13 +186,16 @@ class SAEInfo(eqx.Module):
         
         updated_activated_in = jnp.where(activations > 0, 0, self.activated_in + 1)
         
-        # https://github.com/google-deepmind/optax/blob/63cdeb4ada95498626a52d209a029210ac066aa1/optax/transforms/_clipping.py#L91
-        new_grad_clip_percent = (
-            (global_norm(grads) > self.config.grad_clip_threshold)
-            .squeeze()
-            .astype(jnp.float32)
-        )
-        updated_grad_clip_percent = self.grad_clip_percent * weighting_factor + new_grad_clip_percent * new_weighting_factor
+        if self.config.do_update:
+            # https://github.com/google-deepmind/optax/blob/63cdeb4ada95498626a52d209a029210ac066aa1/optax/transforms/_clipping.py#L91
+            new_grad_clip_percent = (
+                (global_norm(grads) > self.config.grad_clip_threshold)
+                .squeeze()
+                .astype(jnp.float32)
+            )
+            updated_grad_clip_percent = self.grad_clip_percent * weighting_factor + new_grad_clip_percent * new_weighting_factor
+        else:
+            updated_grad_clip_percent = self.grad_clip_percent
         
         new_weight_norms = dict(W_enc=jnp.linalg.norm(sae.W_enc), W_dec=jnp.linalg.norm(sae.W_dec))
         new_weight_grad_norms = dict(
@@ -333,6 +338,10 @@ class SAE(eqx.Module):
         return replace(grads, W_dec=W_dec)
     
     def apply_updates(self, updates: "SAE", grads: "SAE", past_output: SAEOutput) -> "SAE":
+        if not self.config.do_update:
+            self = eqx.tree_at(lambda x: x.info, self,
+                                replace_fn=lambda info: info.step(self, updates, grads, past_output))
+            return self
         updated = eqx.apply_updates(self, updates)
         updated = eqx.tree_at(
             lambda x: x.b_post,
@@ -435,7 +444,7 @@ class SAETrainer(eqx.Module):
         sae = eqx.combine(self.sae_params, self.sae_logic)
         sae_grad = sae.process_gradients(sae_grad)
         updates, optimizer_state = self.optimizer.update(sae_grad, self.optimizer_state, self.sae_params)
-        start_updating = self.sae_logic.info.n_steps > 1
+        start_updating = self.sae_logic.config.do_update & (self.sae_logic.info.n_steps > 1)
         updates = jax.tree.map(
             lambda u: jnp.where(start_updating, u, 0),
             updates)
@@ -446,8 +455,10 @@ class SAETrainer(eqx.Module):
         
         updated_sae = sae.apply_updates(updates, sae_grad, sae_outputs)
         sae_params, sae_logic = updated_sae.split()
-        updated_ema = jax.tree.map(lambda ema, sae: ema * self.config.ema + sae * (1 - self.config.ema),
-                                   self.ema, sae_params)
+        updated_ema = jax.tree.map(
+            lambda ema, sae: jnp.where(start_updating,
+                                       ema * self.config.ema + sae * (1 - self.config.ema), 0),
+            self.ema, sae_params)
         return replace(self, sae_params=sae_params, sae_logic=sae_logic,
                        ema=updated_ema, optimizer_state=optimizer_state), sae_outputs
 
