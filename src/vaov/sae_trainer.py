@@ -22,7 +22,7 @@ import os
 import json
 from pathlib import Path
 import orbax.checkpoint as ocp
-from typing import Sequence, Optional, List
+from typing import Sequence, Literal
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 
@@ -43,6 +43,7 @@ class SAEConfig:
 
     batch_size: int = 4
     seq_len: int = 768
+    seq_mode: Literal["both", "text", "image"] = "both"
     n_steps: int = 100_000
     wandb_name: tuple[str, str] = ("neverix", "vaov")
 
@@ -57,8 +58,36 @@ class SAEConfig:
     warmup_steps: int = 50
     
     @property
+    def real_seq_len(self):
+        if self.seq_mode == "txt":
+            return 512
+        elif self.seq_mode == "img":
+            return self.seq_len - 512
+        return self.seq_len
+    
+    @property
     def full_batch_size(self):
-        return self.batch_size * self.seq_len
+        return self.batch_size * self.real_seq_len
+
+    @property
+    def width_and_height(self):
+        seq_len = self.seq_len
+        width_height_product = (seq_len - 512) * (16 * 16)
+        width_and_height = math.isqrt(width_height_product)
+        return width_and_height, width_and_height
+
+    def cut_up(
+        self, training_data: Float[Array, "*batch seq_len d_model"]
+    ) -> Float[Array, "full_batch_size d_model"]:
+        training_data = training_data.astype(jnp.bfloat16)
+        if self.seq_mode == "txt":
+            x = training_data[..., :512, :]
+        elif self.seq_mode == "img":
+            x = training_data[..., 512:, :]
+        
+        training_data = training_data.reshape(-1, training_data.shape[-1])
+        assert training_data.shape == (self.full_batch_size, self.d_model)
+        return x.reshape(self.batch_size, self.seq_len, self.d_model)
 
 
 class SAEConfigHandler(ocp.type_handlers.TypeHandler):
@@ -526,8 +555,7 @@ def main():
         save_every=500,
         restore="somewhere/sae_mid",
     )
-    width_height_product = (config.seq_len - 512) * (16 * 16)
-    width_and_height = math.isqrt(width_height_product)
+    width, height = config.width_and_height
     appeared_prompts = set()
     cycle_detected = False
     for batch_idx, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
@@ -548,15 +576,14 @@ def main():
             decode_latents=True,
             sample_steps=1,
             key=key,
-            width=width_and_height,
-            height=width_and_height
+            width=width,
+            height=height
         )
         for i, image in enumerate(images):
             image.save(f"somewhere/samples/{i}.png")
         logger.add(sys.stderr, level="INFO")
         training_data = jnp.concatenate((reaped["double_img"][-1], reaped["double_txt"][-1]), axis=-2)
-        training_data = training_data.astype(jnp.bfloat16).reshape(-1, training_data.shape[-1])
-        assert training_data.shape == (config.full_batch_size, config.d_model)
+        training_data = config.cut_up(training_data)
         for v in reaped.values():
             v.delete()
         sae_trainer.step(training_data)
