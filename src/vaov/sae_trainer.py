@@ -177,8 +177,11 @@ class SAEInfo(eqx.Module):
     def step(self, sae: "SAE", grads: "SAE", updates: "SAE", outputs: SAEOutput):
         weighting_factor, new_weighting_factor = self.n_steps / (self.n_steps + 1), 1 / (self.n_steps + 1)
 
-        new_avg_norm = jnp.mean(jnp.linalg.norm(outputs.x, axis=-1))
-        updated_avg_norm = self.avg_norm * weighting_factor + new_avg_norm * new_weighting_factor
+        if self.config.do_update:
+            new_avg_norm = jnp.mean(jnp.linalg.norm(outputs.x, axis=-1))
+            updated_avg_norm = self.avg_norm * weighting_factor + new_avg_norm * new_weighting_factor
+        else:
+            updated_avg_norm = self.avg_norm
         
         activations = jnp.zeros(self.feature_density.shape).at[outputs.k_indices.flatten()].add(1)
         new_feature_density = activations / self.config.full_batch_size
@@ -305,15 +308,10 @@ class SAE(eqx.Module):
         loss = recon_loss + self.config.aux_k_coeff * aux_k_loss
         
         fvu = jnp.mean(jnp.square(x_normed - y_normed)) / jnp.mean(jnp.square(x_normed))
-        # var_explained = jnp.square(
-        #     ((y_normed - y_normed.mean(axis=0)) / (y_normed.std(axis=0) + 1e-8)
-        #     * (x_normed - x_normed.mean(axis=0)) / (x_normed.std(axis=0) + 1e-8)
-        #     ).mean(0)
-        # ).mean()
         correlation = ((x_normed - x_normed.mean(axis=0)) * (y_normed - y_normed.mean(axis=0))).mean(axis=0)
-        var_explained = jnp.square(correlation) / (
+        var_explained = (jnp.square(correlation) / (
             jnp.var(x_normed, axis=0) * jnp.var(y_normed, axis=0)
-        )
+        )).mean()
         
         return SAEOutput(
             x_normed=x_normed,
@@ -442,6 +440,8 @@ class SAETrainer(eqx.Module):
         sae_grad, sae_outputs = self.loss_fn(self.sae_params, self.sae_logic, x)
         
         sae = eqx.combine(self.sae_params, self.sae_logic)
+        if not self.sae_logic.config.do_update:
+            sae_grad = jax.tree.map(jnp.zeros_like, sae_grad)
         sae_grad = sae.process_gradients(sae_grad)
         updates, optimizer_state = self.optimizer.update(sae_grad, self.optimizer_state, self.sae_params)
         start_updating = self.sae_logic.config.do_update & (self.sae_logic.info.n_steps > 1)
@@ -500,6 +500,7 @@ class SAEOverseer:
                 save_at = ocp.test_utils.erase_and_create_empty(save_at)
             self.save_at = save_at
             options = ocp.CheckpointManagerOptions(max_to_keep=1, save_interval_steps=save_every)
+            self.save_every = save_every
             self.mngr = ocp.CheckpointManager(
                 save_at,
                 ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
@@ -519,7 +520,7 @@ class SAEOverseer:
             self.run.log({k: v}, step=step)
         self.bar.update()
         self.bar.set_postfix(pure_log_dict)
-        if self.save_at:
+        if self.save_at and self.save_every:
             self.save(step)
         return sae_outputs
     
@@ -560,10 +561,13 @@ def main():
     logger.info("Creating Flux")
     ensemble = FluxEnsemble(use_schnell=True, use_fsdp=True)
     logger.info("Creating SAE trainer")
-    config = SAEConfig()
+    config = SAEConfig(
+        do_update=False,
+        seq_mode="img",
+    )
     sae_trainer = SAEOverseer(
         config,
-        save_every=500,
+        save_every=None,
         restore="somewhere/sae_mid",
     )
     width, height = config.width_and_height
