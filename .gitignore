@@ -2,6 +2,8 @@ wandb/
 somewhere/
 **/__pycache__/
 .venv/
+# zed stuff
+.sess*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

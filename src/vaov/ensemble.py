@@ -47,7 +47,7 @@ class FluxEnsemble:
         mesh_shape = np.arange(device_count).reshape(*shape_request).shape
         physical_mesh = mesh_utils.create_device_mesh(mesh_shape)
         self.mesh = jax.sharding.Mesh(physical_mesh, ("dp", "fsdp", "tp"))
-        
+
         logger.info("Creating CLIP")
         self.clip = CLIPInterface(self.mesh, clip_name=clip_name)
         logger.info("Creating T5")
@@ -63,7 +63,7 @@ class FluxEnsemble:
         n_tokens = width * height / (16 * 16)
         schedule = get_flux_schedule(n_tokens, sample_steps,
                                      shift_time=self.curve_schedule)
-        
+
         logger.info("Sampling image for texts: {}", texts)
         batch_size = len(texts)
         logger.info("Encoding text using CLIP")
@@ -86,6 +86,7 @@ class FluxEnsemble:
             denoised, reaped = result
         else:
             denoised = result
+        assert isinstance(denoised, jnp.ndarray)
         logger.info("Decoding")
         vae = self.flux.vae
         denoised = denoised.reshape(-1, *denoised.shape[2:])

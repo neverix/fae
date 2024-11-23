@@ -1,3 +1,4 @@
+from collections import defaultdict
 from fire import Fire
 import numpy as np
 from jax.experimental import mesh_utils
@@ -12,10 +13,14 @@ from loguru import logger
 from tqdm.auto import tqdm
 from optax._src.linear_algebra import global_norm
 import optax
+import heapq
+import queue
 import jax.numpy as jnp
 import equinox as eqx
 import wandb
 import math
+import threading
+import shutil
 import jax
 import sys
 import os
@@ -25,83 +30,19 @@ import orbax.checkpoint as ocp
 from typing import Sequence, Literal
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
-
-
-@dataclass(frozen=True)
-class SAEConfig:
-    d_model: int = 3072
-    n_features: int = 65536
-    
-    do_update: bool = True
-    
-    param_dtype: jax.typing.DTypeLike = jnp.float32
-    bias_dtype: jax.typing.DTypeLike = jnp.float32
-    clip_data: float = 64.0
-    
-    k: int = 128
-    aux_k: int = 128
-    aux_k_coeff: float = 1/32
-    dead_after: int = 1_000
-
-    batch_size: int = 4
-    seq_len: int = 768
-    seq_mode: Literal["both", "text", "image"] = "both"
-    n_steps: int = 100_000
-    wandb_name: tuple[str, str] = ("neverix", "vaov")
-
-    tp_size: int = jax.local_device_count()
-    
-    learning_rate: float = 4e-4
-    beta1: float = 0.9
-    beta2: float = 0.99
-    eps: float = 1e-8
-    ema: float = 0.995
-    grad_clip_threshold: float = 1.0
-    warmup_steps: int = 50
-    
-    @property
-    def real_seq_len(self):
-        if self.seq_mode == "txt":
-            return 512
-        elif self.seq_mode == "img":
-            return self.seq_len - 512
-        return self.seq_len
-    
-    @property
-    def full_batch_size(self):
-        return self.batch_size * self.real_seq_len
-
-    @property
-    def width_and_height(self):
-        seq_len = self.seq_len
-        width_height_product = (seq_len - 512) * (16 * 16)
-        width_and_height = math.isqrt(width_height_product)
-        return width_and_height, width_and_height
-
-    def cut_up(
-        self, training_data: Float[Array, "*batch seq_len d_model"]
-    ) -> Float[Array, "full_batch_size d_model"]:
-        training_data = training_data.astype(jnp.bfloat16)
-        if self.seq_mode == "txt":
-            training_data = training_data[..., :512, :]
-        elif self.seq_mode == "img":
-            training_data = training_data[..., 512:, :]
-        
-        training_data = training_data.reshape(-1, training_data.shape[-1])
-        assert training_data.shape == (self.full_batch_size, self.d_model)
-        return training_data
+from .sae_common import SAEConfig, SAEOutputSaver
 
 
 class SAEConfigHandler(ocp.type_handlers.TypeHandler):
     def __init__(self):
         self._executor = ThreadPoolExecutor(max_workers=1)
-    
+
     def typestr(self):
         return "SAEConfig"
-    
+
     async def metadata(self, infos: Sequence[ocp.type_handlers.ParamInfo]):
         return [ocp.metadata.Metadata(name=info.name, directory=info.path) for info in infos]
-    
+
     async def serialize(self, values, infos, args = None):
         futures = []
         for value, info in zip(values, infos):
@@ -112,7 +53,7 @@ class SAEConfigHandler(ocp.type_handlers.TypeHandler):
                 )
             )
         return futures
-    
+
     async def deserialize(self, infos, args = None):
         del args
         futures = []
@@ -150,7 +91,7 @@ class SAEInfo(eqx.Module):
     weight_norms: dict
     weight_grad_norms: dict
     grad_clip_percent: Float[Array, ""]
-    
+
     @classmethod
     def create(cls, config: SAEConfig, W_enc: Float[Array, "d_model n_features"]) -> "SAEInfo":
         return cls(
@@ -163,11 +104,11 @@ class SAEInfo(eqx.Module):
             weight_norms=dict(W_enc=jnp.linalg.norm(W_enc), W_dec=jnp.linalg.norm(W_enc.T)),
             weight_grad_norms=dict(W_enc=jnp.zeros(()), W_dec=jnp.zeros(()))
         )
-    
+
     @property
     def tgt_norm(self):
         return math.sqrt(self.config.d_model)
-    
+
     def norm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
         return x / self.avg_norm * self.tgt_norm
 
@@ -182,13 +123,13 @@ class SAEInfo(eqx.Module):
             updated_avg_norm = self.avg_norm * weighting_factor + new_avg_norm * new_weighting_factor
         else:
             updated_avg_norm = self.avg_norm
-        
+
         activations = jnp.zeros(self.feature_density.shape).at[outputs.k_indices.flatten()].add(1)
         new_feature_density = activations / self.config.full_batch_size
         updated_feature_density = self.feature_density * weighting_factor + new_feature_density * new_weighting_factor
-        
+
         updated_activated_in = jnp.where(activations > 0, 0, self.activated_in + 1)
-        
+
         if self.config.do_update:
             # https://github.com/google-deepmind/optax/blob/63cdeb4ada95498626a52d209a029210ac066aa1/optax/transforms/_clipping.py#L91
             new_grad_clip_percent = (
@@ -199,12 +140,12 @@ class SAEInfo(eqx.Module):
             updated_grad_clip_percent = self.grad_clip_percent * weighting_factor + new_grad_clip_percent * new_weighting_factor
         else:
             updated_grad_clip_percent = self.grad_clip_percent
-        
+
         new_weight_norms = dict(W_enc=jnp.linalg.norm(sae.W_enc), W_dec=jnp.linalg.norm(sae.W_dec))
         new_weight_grad_norms = dict(
             W_enc=jnp.linalg.norm(grads.W_enc), W_dec=jnp.linalg.norm(grads.W_dec)
         )
-        
+
         return replace(self,
             n_steps=self.n_steps + 1,
             avg_norm=updated_avg_norm,
@@ -214,7 +155,7 @@ class SAEInfo(eqx.Module):
             weight_norms=new_weight_norms,
             weight_grad_norms=new_weight_grad_norms
         )
-    
+
     @classmethod
     def pspec(cls, config: SAEConfig) -> "SAEInfo":
         return SAEInfo(
@@ -299,20 +240,20 @@ class SAE(eqx.Module):
         dead_weights = jnp.where(
             dead_activated_in > self.config.dead_after, dead_weights, 0
         )
-        
+
         dead_indices = jnp.broadcast_to(dead_indices, dead_weights.shape)
         aux_y_normed = sparse_matmul(dead_weights, dead_indices, self.W_dec) + self.b_post
         aux_k_loss = jnp.mean(jnp.square(x_normed - aux_y_normed), axis=-1)
         aux_k_loss = jnp.where(info.n_steps >= self.config.dead_after, aux_k_loss, 0)
-        
+
         loss = recon_loss + self.config.aux_k_coeff * aux_k_loss
-        
+
         fvu = jnp.mean(jnp.square(x_normed - y_normed)) / jnp.mean(jnp.square(x_normed))
         correlation = ((x_normed - x_normed.mean(axis=0)) * (y_normed - y_normed.mean(axis=0))).mean(axis=0)
         var_explained = (jnp.square(correlation) / (
             jnp.var(x_normed, axis=0) * jnp.var(y_normed, axis=0)
         )).mean()
-        
+
         return SAEOutput(
             x_normed=x_normed,
             x=x,
@@ -328,13 +269,13 @@ class SAE(eqx.Module):
             fvu=fvu,
             var_explained=var_explained
         )
-    
+
     def process_gradients(self, grads: "SAE") -> "SAE":
         W_dec = grads.W_dec
         W_dec = W_dec - jnp.einsum("ij,ij->i", W_dec, self.W_dec)[:, None] * self.W_dec
         # W_dec @ self.W_dec.T = 0
         return replace(grads, W_dec=W_dec)
-    
+
     def apply_updates(self, updates: "SAE", grads: "SAE", past_output: SAEOutput) -> "SAE":
         if not self.config.do_update:
             self = eqx.tree_at(lambda x: x.info, self,
@@ -358,7 +299,7 @@ class SAE(eqx.Module):
         return eqx.partition(self,
                              lambda x: eqx.is_array(x) and not isinstance(x, (SAEInfo, SAEConfig)),
                              is_leaf=lambda x: isinstance(x, (SAEInfo, SAEConfig)))
-    
+
     @classmethod
     def pspec(cls, config: SAEConfig) -> "SAE":
         return cls(
@@ -381,7 +322,7 @@ class SAETrainer(eqx.Module):
     ema: SAE
     optimizer: optax.GradientTransformation
     optimizer_state: SAE
-    
+
     @classmethod
     def create(cls, config: SAEConfig, key: jax.random.PRNGKey):
         logger.info("Creating mesh")
@@ -403,7 +344,7 @@ class SAETrainer(eqx.Module):
             ),
         )(key)
         sae_params, sae_logic = sae.split()
-        
+
         logger.info("Creating optimizer")
         scheduler = optax.warmup_cosine_decay_schedule(
             init_value=0.0, peak_value=config.learning_rate,
@@ -413,10 +354,10 @@ class SAETrainer(eqx.Module):
             optax.adam(scheduler, b1=config.beta1, b2=config.beta2, eps=config.eps)
         )
         optimizer_state = optimizer.init(sae_params)
-        
+
         logger.info("Creating EMA")
         ema = jax.tree.map(jnp.copy, sae_params)
-        
+
         return cls(
             config=config,
             sae_params=sae_params,
@@ -425,7 +366,7 @@ class SAETrainer(eqx.Module):
             optimizer=optimizer,
             optimizer_state=optimizer_state
         )
-    
+
     @staticmethod
     @partial(jax.jit, static_argnums=(1,))
     @partial(jax.grad, has_aux=True)
@@ -434,11 +375,11 @@ class SAETrainer(eqx.Module):
         sae = eqx.combine(sae_params, sae_logic)
         outputs = sae(x)
         return outputs.loss.mean(), outputs
-    
+
     @partial(eqx.filter_jit, donate="all")
     def step(self, x: Float[Array, "batch_size d_model"]) -> tuple["SAETrainer", SAEOutput]:
         sae_grad, sae_outputs = self.loss_fn(self.sae_params, self.sae_logic, x)
-        
+
         sae = eqx.combine(self.sae_params, self.sae_logic)
         if not self.sae_logic.config.do_update:
             sae_grad = jax.tree.map(jnp.zeros_like, sae_grad)
@@ -452,7 +393,7 @@ class SAETrainer(eqx.Module):
             lambda o, ld: jnp.where(start_updating, o, ld),
             optimizer_state, self.optimizer_state
         )
-        
+
         updated_sae = sae.apply_updates(updates, sae_grad, sae_outputs)
         sae_params, sae_logic = updated_sae.split()
         updated_ema = jax.tree.map(
@@ -462,8 +403,8 @@ class SAETrainer(eqx.Module):
         return replace(self, sae_params=sae_params, sae_logic=sae_logic,
                        ema=updated_ema, optimizer_state=optimizer_state), sae_outputs
 
-    def log_dict(self, sae_outputs: SAEOutput) -> dict[str, float]:
-        return {
+    def log_dict(self, sae_outputs: SAEOutput) -> dict[str, (float | wandb.Histogram)]:
+        log_dict = {
             "recon_loss": sae_outputs.losses["recon_loss"].mean(),
             "aux_k_loss": sae_outputs.losses["aux_k_loss"].mean(),
             "loss": sae_outputs.loss.mean(),
@@ -479,6 +420,10 @@ class SAETrainer(eqx.Module):
             "W_dec_grad_norm": self.sae_logic.info.weight_grad_norms["W_dec"],
             "tokens_processed": self.sae_logic.info.n_steps * self.config.full_batch_size
         }
+        return {
+            k: (float(v) if not isinstance(v, wandb.Histogram) else v)
+            for k, v in log_dict.items()
+        }
 
 
 class SAEOverseer:
@@ -492,7 +437,7 @@ class SAEOverseer:
                 entity=config.wandb_name[0], project=config.wandb_name[1], config=config
             )
         self.bar = tqdm(total=config.n_steps)
-        
+
         self.save_at = None
         if save_at:
             save_at = Path(save_at).resolve()
@@ -523,7 +468,7 @@ class SAEOverseer:
         if self.save_at and self.save_every:
             self.save(step)
         return sae_outputs
-    
+
     def save(self, step: int):
         save_dict = dict(
             sae_params=self.sae_trainer.sae_params,
@@ -532,8 +477,8 @@ class SAEOverseer:
             optimizer_state=self.sae_trainer.optimizer_state
         )
         self.mngr.save(step, save_dict)
-        
-    
+
+
     def restore(self):
         save_dict = self.mngr.restore(
             self.mngr.latest_step(),
@@ -554,6 +499,32 @@ class SAEOverseer:
         self.bar.last_print_n = int(self.sae_trainer.sae_logic.info.n_steps)
 
 
+# by ChatGPT
+class WorkerThread(threading.Thread):
+    def __init__(self, obj):
+        super().__init__()
+        self.obj = obj
+        self.task_queue = queue.Queue()
+        self.daemon = True  # Allow thread to exit when the main program ends
+
+    def save(self, *args, **kwargs):
+        self.task_queue.put((args, kwargs))
+
+    def run(self):
+        while True:
+            try:
+                # Get a task from the queue
+                args, kwargs = self.task_queue.get()
+
+                # Call the .save() method with the provided arguments
+                self.obj.save(*args, **kwargs)
+
+                # Mark the task as done
+                self.task_queue.task_done()
+            except Exception as e:
+                print(f"Error processing task: {e}")
+
+
 def main():
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("k-mktr/improved-flux-prompts")
@@ -570,10 +541,11 @@ def main():
         save_every=None,
         restore="somewhere/sae_mid",
     )
+    saver = WorkerThread(SAEOutputSaver(config, Path("somewhere/maxacts")))
     width, height = config.width_and_height
     appeared_prompts = set()
     cycle_detected = False
-    for batch_idx, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
+    for step, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
         if len(prompts) < config.batch_size:
             logger.warning("End of dataset")
             continue
@@ -583,25 +555,28 @@ def main():
                 cycle_detected = True
                 logger.warning("Cycle detected")
             appeared_prompts |= new_prompts
-        key = jax.random.key(batch_idx)
+        key = jax.random.key(step)
         logger.remove()
         images, reaped = ensemble.sample(
             prompts,
             debug_mode=True,
-            decode_latents=True,
+            decode_latents=False,
             sample_steps=1,
             key=key,
             width=width,
             height=height
         )
-        for i, image in enumerate(images):
-            image.save(f"somewhere/samples/{i}.png")
+        assert isinstance(images, jnp.ndarray)  # to silence mypy
         logger.add(sys.stderr, level="INFO")
         training_data = jnp.concatenate((reaped["double_img"][-1], reaped["double_txt"][-1]), axis=-2)
         training_data = config.cut_up(training_data)
         for v in reaped.values():
             v.delete()
-        sae_trainer.step(training_data)
+        sae_outputs = sae_trainer.step(training_data)
+        sae_weights, sae_indices = map(config.uncut, jax.device_put((sae_outputs.k_weights, sae_outputs.k_indices), jax.devices("cpu")[0]))
+        saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
+
+    print("Waiting for saver to leave...")
 
 
 if __name__ == "__main__":
