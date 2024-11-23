@@ -499,32 +499,6 @@ class SAEOverseer:
         self.bar.last_print_n = int(self.sae_trainer.sae_logic.info.n_steps)
 
 
-# by ChatGPT
-class WorkerThread(threading.Thread):
-    def __init__(self, obj):
-        super().__init__()
-        self.obj = obj
-        self.task_queue = queue.Queue()
-        self.daemon = True  # Allow thread to exit when the main program ends
-
-    def save(self, *args, **kwargs):
-        self.task_queue.put((args, kwargs))
-
-    def run(self):
-        while True:
-            try:
-                # Get a task from the queue
-                args, kwargs = self.task_queue.get()
-
-                # Call the .save() method with the provided arguments
-                self.obj.save(*args, **kwargs)
-
-                # Mark the task as done
-                self.task_queue.task_done()
-            except Exception as e:
-                print(f"Error processing task: {e}")
-
-
 def main():
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("k-mktr/improved-flux-prompts")
@@ -541,7 +515,7 @@ def main():
         save_every=None,
         restore="somewhere/sae_mid",
     )
-    saver = WorkerThread(SAEOutputSaver(config, Path("somewhere/maxacts")))
+    saver = SAEOutputSaver(config, Path("somewhere/maxacts"))
     width, height = config.width_and_height
     appeared_prompts = set()
     cycle_detected = False
@@ -573,8 +547,19 @@ def main():
         for v in reaped.values():
             v.delete()
         sae_outputs = sae_trainer.step(training_data)
-        sae_weights, sae_indices = map(config.uncut, jax.device_put((sae_outputs.k_weights, sae_outputs.k_indices), jax.devices("cpu")[0]))
+        logger.info("uncutting")
+        sae_weights, sae_indices = map(
+            config.uncut,
+            jax.block_until_ready(
+                jax.device_put(
+                    (sae_outputs.k_weights, sae_outputs.k_indices),
+                    jax.devices("cpu")[0]
+                )
+            )
+        )
+        logger.info("saving")
         saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
+        logger.info("next step")
 
     print("Waiting for saver to leave...")
 

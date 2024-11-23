@@ -12,6 +12,7 @@ import json
 import shutil
 from loguru import logger
 from pathlib import Path
+from .scored_storage import ScoredStorage
 import math
 
 
@@ -125,63 +126,6 @@ class SAEConfig:
         return txt, img
 
 
-# by Claude
-class TopK:
-    """
-    Maintains only the top K items encountered so far.
-    Uses a min heap to efficiently track maximum values.
-    """
-    def __init__(self, k):
-        if k < 1:
-            raise ValueError("K must be positive")
-        self.k = k
-        self.heap = []  # Will store tuples of (score, item)
-
-    def add(self, item, score):
-        """Add an item with its score. Only keeps if it's in the top K."""
-        if len(self.heap) < self.k:
-            # Still filling up initial K slots
-            heapq.heappush(self.heap, (score, item))
-        elif score > self.heap[0][0]:
-            # Score is better than our current minimum
-            heapq.heapreplace(self.heap, (score, item))
-
-    def get_top_k(self):
-        """Returns the current top K items in descending order."""
-        return [(item, score) for score, item in sorted(self.heap, reverse=True)]
-
-    def save(self, path: Path):
-        """
-        Save the current top K items to a JSON file.
-
-        Args:
-            path: path where the JSON file should be saved
-        """
-        # Convert to list of [item, score] for better JSON readability
-        data = {
-            "k": self.k,
-            "items": [[item, score] for score, item in self.heap]
-        }
-        path.write_text(json.dumps(data))
-
-    @classmethod
-    def load(cls, path: Path):
-        """
-        Load a TopK instance from a JSON file.
-
-        Args:
-            path: A pathlib Path to load the JSON file from
-        Returns:
-            A new TopK instance with the loaded data
-        """
-        data = json.loads(path.read_text())
-        tracker = cls(data["k"])
-        # Convert back to (score, item) tuples and add to heap
-        tracker.heap = [(score, item) for item, score in data["items"]]
-        heapq.heapify(tracker.heap)  # Ensure heap property is maintained
-        return tracker
-
-
 class SAEOutputSaver(object):
     def __init__(self, config: SAEConfig, save_dir: os.PathLike):
         self.config = config
@@ -193,7 +137,10 @@ class SAEOutputSaver(object):
         for dir in special_dirs:
             dir.mkdir(parents=True, exist_ok=True)
         self.images_dir, self.texts_dir, self.activations_dir = special_dirs
-        self.feature_acts = defaultdict(partial(TopK, self.config.top_k_activations))
+        self.feature_acts = ScoredStorage(
+            save_dir / "feature_acts.db",
+            4, config.top_k_activations
+        )
 
     def save(
         self,
@@ -221,14 +168,12 @@ class SAEOutputSaver(object):
                 (images_to_save[..., ::2] & 0x0F)
                 | ((images_to_save[..., 1::2] << 4) & 0xF0))
             np.savez_compressed(self.images_dir / f"{step}.npz", images_to_save)
+        new_data = []
         for i in range(batch_size):
             if use_img:
                 for x in range(img_seq_len):
                     for a in range(k):
                         feature_num, activation = int(sae_indices_img[i, x, a]), float(sae_weights_img[i, x, a])
                         h, w = x // images.shape[2], x % images.shape[2]
-                        self.feature_acts[feature_num].add((step, i, h, w), activation)
-        if step % self.config.save_maxacts_every == self.config.save_maxacts_every - 1:
-            logger.info(f"Saving max acts at step {step}")
-            for k, v in self.feature_acts.items():
-                v.save(self.activations_dir / f"{k}.json")
+                        new_data.append((feature_num, (step, i, h, w), activation))
+        self.feature_acts.insert_many(new_data)
