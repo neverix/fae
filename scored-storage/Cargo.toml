@@ -1,0 +1,14 @@
+[package]
+name = "scored_storage"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "scored_storage"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+memmap2 = "0.5.8"
+heapless = "0.7.8"
+pyo3 = { version="0.23.1", features=["extension-module"] }
+tempfile = "3.14.0"

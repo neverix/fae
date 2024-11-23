@@ -4,8 +4,11 @@
 ```
 uv sync
 mkdir -p somewhere
+cd scored-storage; maturin develop; cd ..
 git lfs clone https://huggingface.co/nev/taef1 somewhere/taef1
 uv run python -m src.vaov.server
+uv run python -m src.vaov.sae_trainer
+uv run python main.py
 ```
 
 ## Credits

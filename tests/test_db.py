@@ -1,7 +1,7 @@
 import unittest
 import os
 import sqlite3
-from src.vaov.scored_storage import ScoredStorage
+from scored_storage import ScoredStorage
 
 class TestScoredStorage(unittest.TestCase):
     DB_PATH = 'test_scored_storage.db'

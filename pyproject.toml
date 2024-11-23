@@ -18,14 +18,16 @@ dependencies = [
     "libtpu-nightly",
     "loguru>=0.7.2",
     "matplotlib>=3.9.2",
+    "maturin>=1.7.4",
     "more-itertools>=10.5.0",
     "onnx>=1.17.0",
     "orbax>=0.1.9",
     "oryx>=0.2.7",
+    "pip>=24.3.1",
     "python-fasthtml>=0.10.0",
     "qax>=0.4.1",
     "sentencepiece>=0.2.0",
-    "torch>=2.4.1",
+    "torch[cpu]>=2.4.1",
     "transformers>=4.44.2",
     "uvicorn>=0.32.0",
     "wandb>=0.18.7",
@@ -41,6 +43,7 @@ packages = ["src/vaov"]
 [tool.uv]
 extra-index-url = ["https://download.pytorch.org/whl/cpu"]
 index-strategy = "first-index"
+cache-keys = [{file = "pyproject.toml"}, {file = "rust/Cargo.toml"}, {file = "**/*.rs"}]
 
 [tool.uv.sources]
 libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" }
