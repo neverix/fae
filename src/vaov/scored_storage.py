@@ -1,60 +1,40 @@
-import sqlite3
 from typing import List, Tuple, Any, Dict
+import numpy as np
 import os
 
 
 class ScoredStorage:
-    def __init__(self, db_path: os.PathLike, num_params: int, max_rows_per_key: int):
+    def __init__(
+        self,
+        db_path: os.PathLike, num_params: int, max_rows_per_key: int,
+        mode: str = "w+"
+    ):
         self.db_path = db_path
         self.num_params = num_params
         self.max_rows_per_key = max_rows_per_key
+        self.mode = mode
 
-        # Ensure the database connection is optimized
-        self.connection = sqlite3.connect(self.db_path, isolation_level=None)
-        self.connection.execute("PRAGMA journal_mode=WAL;")  # Enable Write-Ahead Logging
-        self.connection.execute("PRAGMA synchronous=NORMAL;")  # Reduce durability for better performance
-        self.connection.execute("PRAGMA mmap_size=30000000000;")  # Use memory-mapped I/O
-        self.connection.execute("PRAGMA cache_size=-16000;")  # Use ~16MB of cache
-        self.connection.execute("PRAGMA page_size=65536;")  # Increase page size to 64KB
+        self.db = np.memmap(
+            db_path,
+            dtype=np.uint32,
+            mode=mode,
+            shape=(1, self.max_rows_per_key + 1, self.entry_len)
+        )
+        self.db[:] = 0
 
-        # Dynamically create table columns based on num_params
-        param_columns = ", ".join([f"param{i} REAL NOT NULL" for i in range(1, num_params + 1)])
-        param_index = ", ".join([f"param{i}" for i in range(1, num_params + 1)])
+    @property
+    def entry_len(self):
+        return 1 + self.num_params
 
-        with self.connection:
-            self.connection.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS scored_data (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    key_name INTEGER NOT NULL,
-                    {param_columns},
-                    score REAL NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(key_name, {param_index})
-                )
-                """
-            )
-            self.connection.execute(
-                f"""
-                CREATE TRIGGER IF NOT EXISTS enforce_top_k_per_key
-                AFTER INSERT ON scored_data
-                BEGIN
-                    DELETE FROM scored_data
-                    WHERE id IN (
-                        SELECT id
-                        FROM (
-                            SELECT id, ROW_NUMBER() OVER (
-                                PARTITION BY key_name
-                                ORDER BY score DESC, created_at DESC
-                            ) AS rank
-                            FROM scored_data
-                            WHERE key_name = NEW.key_name
-                        )
-                        WHERE rank > {self.max_rows_per_key}
-                    );
-                END;
-                """
-            )
+    @property
+    def record_len(self):
+        return 1 + self.entry_len * self.max_rows_per_key
+
+    def to_st(self, i):
+        return 1 + (i - 1) * self.entry_len
+
+    def fr_st(self, i):
+        return 1 + (i - 1) // self.entry_len
 
     def insert_many(self, entries: List[Tuple[int, Tuple[Any, ...], float]]):
         """
@@ -66,62 +46,76 @@ class ScoredStorage:
         Raises:
             ValueError: If any tuple has an incorrect number of parameters.
         """
-        if not entries:
-            return  # No entries to insert
-
-        # Validate that all entries have the correct number of parameters
-        for _, params, _ in entries:
-            if len(params) != self.num_params:
-                raise ValueError("Incorrect number of parameters provided.")
-
-        # Prepare values for batch insertion
-        values = [
-            (key, *params, score)
-            for key, params, score in entries
-        ]
-
-        with self.connection:
-            cursor = self.connection.cursor()
-            try:
-                # Use executemany for batch insertion
-                cursor.executemany(
-                    f"""
-                    INSERT INTO scored_data (key_name, {", ".join([f"param{i}" for i in range(1, self.num_params + 1)])}, score)
-                    VALUES ({", ".join(["?"] * (self.num_params + 2))})
-                    """,
-                    values,
+        if "w" not in self.mode:
+            raise ValueError("Database is not open for writing.")
+        for key, params, score in entries:
+            if key >= self.db.shape[0]:
+                self.db.flush()
+                new_size = (key + 1,) + self.db.shape[1:]
+                del self.db
+                self.db = np.memmap(
+                    self.db_path,
+                    dtype=np.uint32,
+                    mode=self.mode,
+                    shape=new_size
                 )
-            except sqlite3.IntegrityError:
-                # Handle duplicates silently by ignoring them
-                self.connection.rollback()
+            num_entries = self.db[key, 0, 0]
+            if num_entries < self.max_rows_per_key:
+                start_index = 1 + num_entries
+                self.db[key, start_index, 0] = np.array(score, dtype=np.float32).view(np.uint32)
+                self.db[key, start_index, 1:] = np.array(params, dtype=np.uint32)
+                self.db[key, 0, 0] += 1
+            else:
+                if score < self.db[key, 1, 0].view(np.float32):
+                    continue
+                self.db[key, 1], self.db[key, -1] = self.db[key, -1], self.db[key, 1]
+                self.db[key, -1, 0] = np.array(score, dtype=np.float32).view(np.uint32)
+                self.db[key, -1, 1:] = np.array(params, dtype=np.uint32)
+                current_idx = 1
+                # add 1 for s9ze
+                # subtract one for 0-indexing
+                # subtract one for invalid entry (old min)
+                last_valid_entry = (((self.max_rows_per_key + 1) - 1) - 1)
+                while current_idx * 2 <= last_valid_entry:
+                    left_child_idx = current_idx * 2
+                    right_child_idx = left_child_idx + 1
+                    current_score = self.db[key, current_idx, 0].view(np.float32)
+                    left_score = self.db[key, left_child_idx, 0].view(np.float32)
+                    if right_child_idx > last_valid_entry:
+                        if current_score > left_score:
+                            self.db[key, current_idx], self.db[key, left_child_idx] = self.db[key, left_child_idx], self.db[key, current_idx]
+                        break
+                    right_score = self.db[key, right_child_idx, 0].view(np.float32)
+                    if current_score < left_score and current_score < right_score:
+                        break
+                    if left_score < right_score:
+                        self.db[key, current_idx], self.db[key, left_child_idx] = self.db[key, left_child_idx], self.db[key, current_idx]
+                        current_idx = left_child_idx
+                    else:
+                        self.db[key, current_idx], self.db[key, right_child_idx] = self.db[key, right_child_idx], self.db[key, current_idx]
+                        current_idx = right_child_idx
+                self.db[key, -1, 0] = np.array(score, dtype=np.float32).view(np.uint32)
+                self.db[key, -1, 1:] = np.array(params, dtype=np.uint32)
+                current_idx = self.max_rows_per_key
+                while current_idx // 2 > 0:
+                    parent_idx = current_idx // 2
+                    if self.db[key, current_idx, 0] < self.db[key, parent_idx, 0]:
+                        break
+                    self.db[key, current_idx], self.db[key, parent_idx] = self.db[key, parent_idx], self.db[key, current_idx]
+                    current_idx = parent_idx
+        self.db.flush()
+
 
     def get_rows(self, key: int) -> List[Tuple[Tuple[Any, ...], float]]:
-        cursor = self.connection.cursor()
-        rows = cursor.execute(
-            f"""
-            SELECT {", ".join([f"param{i}" for i in range(1, self.num_params + 1)])}, score
-            FROM scored_data
-            WHERE key_name = ?
-            ORDER BY score DESC, created_at DESC
-            """,
-            (key,),
-        ).fetchall()
-
-        return [(tuple(row[:-1]), row[-1]) for row in rows]
+        if key < 0 or key >= self.db.shape[0]:
+            return []
+        num_entries = self.db[key, 0, 0]
+        entries = []
+        for entry_idx in range(1, num_entries + 1):
+            score = self.db[key, entry_idx, 0].view(np.float32)
+            params = tuple(self.db[key, entry_idx, 1:])
+            entries.append((params, score))
+        return entries
 
     def key_counts(self) -> Dict[int, int]:
-        cursor = self.connection.cursor()
-        counts = cursor.execute(
-            """
-            SELECT key_name, COUNT(*)
-            FROM scored_data
-            GROUP BY key_name
-            """
-        ).fetchall()
-
-        return {k: count for k, count in counts}
-
-    def close(self):
-        """Close the database connection."""
-        if self.connection:
-            self.connection.close()
+        return {key: int(self.db[key, 0, 0]) for key in range(self.db.shape[0])}
