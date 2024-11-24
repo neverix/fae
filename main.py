@@ -16,7 +16,11 @@ image_cache_dir = Path("somewhere/img_cache")
 if image_cache_dir.exists():
     shutil.rmtree(image_cache_dir)
 image_cache_dir.mkdir(parents=True, exist_ok=True)
-scored_storage = ScoredStorage(cache_dir / "feature_acts.db", 4, SAEConfig.top_k_activations)
+scored_storage = ScoredStorage(
+    cache_dir / "feature_acts.db",
+    4, SAEConfig.top_k_activations,
+    mode="r"
+)
 app = FastHTML()
 
 @app.get("/cached_image/{step}/{image_id}")
@@ -38,6 +42,7 @@ def cached_image(step: int, image_id: int):
 @app.get("/feature_counts")
 def feature_counts():
     counts = scored_storage.key_counts()
+    counts = {key: int(val) for key, val in enumerate(counts)}
     return JSONResponse(counts)
 
 @app.get("/maxacts/{feature_id}")

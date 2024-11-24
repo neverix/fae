@@ -10,6 +10,7 @@ import os
 import heapq
 import json
 import shutil
+import numba as nb
 from loguru import logger
 from pathlib import Path
 from .scored_storage import ScoredStorage
@@ -70,8 +71,7 @@ class SAEConfig:
     grad_clip_threshold: float = 1.0
     warmup_steps: int = 50
 
-    save_maxacts_every: int = 50
-    top_k_activations: int = 16
+    top_k_activations: int = 128
     image_max: float = 5.0
 
     @property
@@ -167,13 +167,26 @@ class SAEOutputSaver(object):
             images_to_save = (
                 (images_to_save[..., ::2] & 0x0F)
                 | ((images_to_save[..., 1::2] << 4) & 0xF0))
-            np.savez_compressed(self.images_dir / f"{step}.npz", images_to_save)
-        new_data = []
-        for i in range(batch_size):
-            if use_img:
-                for x in range(img_seq_len):
-                    for a in range(k):
-                        feature_num, activation = int(sae_indices_img[i, x, a]), float(sae_weights_img[i, x, a])
-                        h, w = x // images.shape[2], x % images.shape[2]
-                        new_data.append((feature_num, (step, i, h, w), activation))
-        self.feature_acts.insert_many(new_data)
+            np.savez(self.images_dir / f"{step}.npz", images_to_save)
+        nums, indices, activations = make_feat_data(sae_indices_img, sae_weights_img, images, step, batch_size, img_seq_len, k, use_img)
+        self.feature_acts.insert_many(nums, indices, activations)
+
+@nb.jit
+def make_feat_data(sae_indices_img, sae_weights_img, images, step, batch_size, img_seq_len, k, use_img):
+    total_activations = sae_indices_img.size
+    nums = np.empty(total_activations, dtype=np.uint32)
+    indices = np.empty((total_activations, 4), dtype=np.uint32)
+    activations = np.empty(total_activations, dtype=np.float32)
+    index = 0
+    for i in range(batch_size):
+        if use_img:
+            for x in range(img_seq_len):
+                for a in range(k):
+                    feature_num, activation = int(sae_indices_img[i, x, a]), float(sae_weights_img[i, x, a])
+                    h, w = x // images.shape[2], x % images.shape[2]
+                    # new_data.append((feature_num, (step, i, h, w), activation))
+                    nums[index] = feature_num
+                    indices[index] = (step, i, h, w)
+                    activations[index] = activation
+                    index += 1
+    return nums, indices, activations

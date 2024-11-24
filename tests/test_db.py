@@ -29,7 +29,7 @@ class TestScoredStorage(unittest.TestCase):
         ]
 
         # Perform the batch insertion
-        storage.insert_many(entries)
+        storage.insert_many(*zip(*entries))
 
         # Verify the content in the database
         rows = storage.get_rows(1)
@@ -49,7 +49,7 @@ class TestScoredStorage(unittest.TestCase):
         ]
 
         # Perform the batch insertion
-        storage.insert_many(entries)
+        storage.insert_many(*zip(*entries))
 
         # Verify only top 3 rows remain
         rows = storage.get_rows(1)
@@ -71,7 +71,7 @@ class TestScoredStorage(unittest.TestCase):
             ]
 
             # Perform the batch insertion
-            storage.insert_many(entries)
+            storage.insert_many(*zip(*entries))
 
             # Verify only top 3 rows remain
             rows = storage.get_rows(1)

@@ -549,11 +549,13 @@ def main():
         sae_outputs = sae_trainer.step(training_data)
         logger.info("uncutting")
         sae_weights, sae_indices = map(
-            config.uncut,
-            jax.block_until_ready(
-                jax.device_put(
-                    (sae_outputs.k_weights, sae_outputs.k_indices),
-                    jax.devices("cpu")[0]
+            config.uncut, map(
+                np.asarray,
+                jax.block_until_ready(
+                    jax.device_put(
+                        (sae_outputs.k_weights, sae_outputs.k_indices),
+                        jax.devices("cpu")[0]
+                    )
                 )
             )
         )
