@@ -14,13 +14,13 @@ class ScoredStorage:
         self.max_rows_per_key = max_rows_per_key
         self.mode = mode
 
+        # min heap
         self.db = np.memmap(
             db_path,
             dtype=np.uint32,
             mode=mode,
             shape=(1, self.max_rows_per_key + 1, self.entry_len)
         )
-        self.db[:] = 0
 
     @property
     def entry_len(self):
@@ -30,11 +30,14 @@ class ScoredStorage:
     def record_len(self):
         return 1 + self.entry_len * self.max_rows_per_key
 
-    def to_st(self, i):
-        return 1 + (i - 1) * self.entry_len
-
-    def fr_st(self, i):
-        return 1 + (i - 1) // self.entry_len
+    def bubble_up(self, key):
+        current_idx = self.db[key, 0, 0]
+        while current_idx // 2 > 0:
+            parent_idx = current_idx // 2
+            if self.db[key, current_idx, 0].view(np.float32) > self.db[key, parent_idx, 0].view(np.float32):
+                break
+            self.db[key, current_idx], self.db[key, parent_idx] = self.db[key, parent_idx].copy(), self.db[key, current_idx].copy()
+            current_idx = parent_idx
 
     def insert_many(self, entries: List[Tuple[int, Tuple[Any, ...], float]]):
         """
@@ -51,6 +54,7 @@ class ScoredStorage:
         for key, params, score in entries:
             if key >= self.db.shape[0]:
                 self.db.flush()
+                old_size = self.db.shape[0]
                 new_size = (key + 1,) + self.db.shape[1:]
                 del self.db
                 self.db = np.memmap(
@@ -65,44 +69,38 @@ class ScoredStorage:
                 self.db[key, start_index, 0] = np.array(score, dtype=np.float32).view(np.uint32)
                 self.db[key, start_index, 1:] = np.array(params, dtype=np.uint32)
                 self.db[key, 0, 0] += 1
+                self.bubble_up(key)
             else:
-                if score < self.db[key, 1, 0].view(np.float32):
+                if score <= self.db[key, 1, 0].view(np.float32):
                     continue
-                self.db[key, 1], self.db[key, -1] = self.db[key, -1], self.db[key, 1]
-                self.db[key, -1, 0] = np.array(score, dtype=np.float32).view(np.uint32)
-                self.db[key, -1, 1:] = np.array(params, dtype=np.uint32)
+                self.db[key, 1], self.db[key, -1] = self.db[key, -1].copy(), self.db[key, 1].copy()
                 current_idx = 1
-                # add 1 for s9ze
+                # add 1 for size
                 # subtract one for 0-indexing
                 # subtract one for invalid entry (old min)
                 last_valid_entry = (((self.max_rows_per_key + 1) - 1) - 1)
-                while current_idx * 2 <= last_valid_entry:
+                while True:
                     left_child_idx = current_idx * 2
+                    if left_child_idx > last_valid_entry:
+                        break
                     right_child_idx = left_child_idx + 1
                     current_score = self.db[key, current_idx, 0].view(np.float32)
                     left_score = self.db[key, left_child_idx, 0].view(np.float32)
-                    if right_child_idx > last_valid_entry:
-                        if current_score > left_score:
-                            self.db[key, current_idx], self.db[key, left_child_idx] = self.db[key, left_child_idx], self.db[key, current_idx]
+                    best_score, best_idx = current_score, current_idx
+                    if left_score < best_score:
+                        best_score, best_idx = left_score, left_child_idx
+                    if right_child_idx <= last_valid_entry:
+                        right_score = self.db[key, right_child_idx, 0].view(np.float32)
+                        if right_score < best_score:
+                            best_score = right_score
+                            best_idx = right_child_idx
+                    if best_idx == current_idx:
                         break
-                    right_score = self.db[key, right_child_idx, 0].view(np.float32)
-                    if current_score < left_score and current_score < right_score:
-                        break
-                    if left_score < right_score:
-                        self.db[key, current_idx], self.db[key, left_child_idx] = self.db[key, left_child_idx], self.db[key, current_idx]
-                        current_idx = left_child_idx
-                    else:
-                        self.db[key, current_idx], self.db[key, right_child_idx] = self.db[key, right_child_idx], self.db[key, current_idx]
-                        current_idx = right_child_idx
+                    self.db[key, current_idx], self.db[key, best_idx] = self.db[key, best_idx].copy(), self.db[key, current_idx].copy()
+                    current_idx = best_idx
                 self.db[key, -1, 0] = np.array(score, dtype=np.float32).view(np.uint32)
                 self.db[key, -1, 1:] = np.array(params, dtype=np.uint32)
-                current_idx = self.max_rows_per_key
-                while current_idx // 2 > 0:
-                    parent_idx = current_idx // 2
-                    if self.db[key, current_idx, 0] < self.db[key, parent_idx, 0]:
-                        break
-                    self.db[key, current_idx], self.db[key, parent_idx] = self.db[key, parent_idx], self.db[key, current_idx]
-                    current_idx = parent_idx
+                self.bubble_up(key)
         self.db.flush()
 
 
