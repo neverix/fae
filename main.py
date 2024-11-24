@@ -1,13 +1,16 @@
 import os
 os.environ["JAX_PLATFORMS"] = "cpu"
-from fasthtml.common import FastHTML, serve
+from fasthtml.common import fast_app, serve
 from fasthtml.common import FileResponse, JSONResponse
+from fasthtml.common import Img, Div, Card
 from src.vaov.vae import FluxVAE
 from src.vaov.sae_common import SAEConfig, nf4
 from src.vaov.scored_storage import ScoredStorage
 import numpy as np
 from pathlib import Path
 import shutil
+from fh_plotly import plotly_headers, plotly2fasthtml
+import plotly.express as px
 
 CACHE_DIRECTORY = "somewhere/maxacts"
 vae = FluxVAE("somewhere/taef1/taef1_encoder.onnx", "somewhere/taef1/taef1_decoder.onnx")
@@ -21,9 +24,9 @@ scored_storage = ScoredStorage(
     4, SAEConfig.top_k_activations,
     mode="r"
 )
-app = FastHTML()
+app, rt = fast_app(hdrs=plotly_headers)
 
-@app.get("/cached_image/{step}/{image_id}")
+@rt("/cached_image/{step}/{image_id}")
 def cached_image(step: int, image_id: int):
     img_path = image_cache_dir / f"{step}_{image_id}.jpg"
     if not img_path.exists():
@@ -39,18 +42,32 @@ def cached_image(step: int, image_id: int):
         img.save(img_path)
     return FileResponse(img_path)
 
-@app.get("/feature_counts")
+
+@rt("/top_features")
+def top_features():
+    counts = scored_storage.key_counts()
+    frequencies = counts.astype(np.float64) / counts.sum()
+    expected_frequency = 1 / counts.size
+    correct_order = np.argsort(np.abs(frequencies - expected_frequency))
+    top_few = correct_order[:16].tolist()
+    return JSONResponse([(i, float(frequencies[i])) for i in top_few])
+
+@rt("/feature_counts")
 def feature_counts():
     counts = scored_storage.key_counts()
     counts = {key: int(val) for key, val in enumerate(counts)}
     return JSONResponse(counts)
 
-@app.get("/maxacts/{feature_id}")
+@rt("/maxacts/{feature_id}")
 def maxacts(feature_id: int):
     rows = scored_storage.get_rows(feature_id)
-    return JSONResponse(rows)
+    rows = sorted(rows, key=lambda x: x[1], reverse=True)
+    imgs = []
+    for (step, idx, h, w), score in rows:
+        imgs.append(Img(src=f"/cached_image/{step}/{idx}"))
+    return Div(map(Card, imgs))
 
-@app.get("/")
+@rt("/")
 def home():
     return "<h1>Hello, World</h1>"
 

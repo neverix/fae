@@ -6,7 +6,7 @@ import os
 
 @nb.njit
 def bubble_up(db, key):
-    current_idx = db[key, 0, 0]
+    current_idx = min(db[key, 0, 0], db.shape[1] - 1)
     while current_idx // 2 > 0:
         parent_idx = current_idx // 2
         if np.uint32(db[key, current_idx, 0]).view(np.float32) > np.uint32(db[key, parent_idx, 0]).view(np.float32):
@@ -28,6 +28,7 @@ def _insert_many_jit(db, nums, indices, activations):
         else:
             if score <= np.uint32(db[key, 1, 0]).view(np.float32):
                 continue
+            db[key, 0, 0] += 1
             db[key, 1], db[key, -1] = db[key, -1].copy(), db[key, 1].copy()
             current_idx = 1
             # add 1 for size
