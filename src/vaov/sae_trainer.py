@@ -499,7 +499,7 @@ class SAEOverseer:
         self.bar.last_print_n = int(self.sae_trainer.sae_logic.info.n_steps)
 
 
-def main():
+def main(train_mode=False):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("k-mktr/improved-flux-prompts")
     prompts_iterator = prompts_dataset["train"]["prompt"]
@@ -507,15 +507,16 @@ def main():
     ensemble = FluxEnsemble(use_schnell=True, use_fsdp=True)
     logger.info("Creating SAE trainer")
     config = SAEConfig(
-        do_update=False,
+        do_update=train_mode,
         seq_mode="img",
     )
     sae_trainer = SAEOverseer(
         config,
-        save_every=None,
-        restore="somewhere/sae_mid",
+        save_every=None if not train_mode else 1000,
+        restore="somewhere/sae_mid" if not train_mode else None,
     )
-    saver = SAEOutputSaver(config, Path("somewhere/maxacts"))
+    if not train_mode:
+        saver = SAEOutputSaver(config, Path("somewhere/maxacts"))
     width, height = config.width_and_height
     appeared_prompts = set()
     cycle_detected = False
@@ -547,21 +548,19 @@ def main():
         for v in reaped.values():
             v.delete()
         sae_outputs = sae_trainer.step(training_data)
-        logger.info("uncutting")
-        sae_weights, sae_indices = map(
-            config.uncut, map(
-                np.asarray,
-                jax.block_until_ready(
-                    jax.device_put(
-                        (sae_outputs.k_weights, sae_outputs.k_indices),
-                        jax.devices("cpu")[0]
+        if not train_mode:
+            sae_weights, sae_indices = map(
+                config.uncut, map(
+                    np.asarray,
+                    jax.block_until_ready(
+                        jax.device_put(
+                            (sae_outputs.k_weights, sae_outputs.k_indices),
+                            jax.devices("cpu")[0]
+                        )
                     )
                 )
             )
-        )
-        logger.info("saving")
-        saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
-        logger.info("next step")
+            saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
 
     print("Waiting for saver to leave...")
 

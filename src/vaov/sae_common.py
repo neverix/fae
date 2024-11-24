@@ -167,7 +167,12 @@ class SAEOutputSaver(object):
             images_to_save = (
                 (images_to_save[..., ::2] & 0x0F)
                 | ((images_to_save[..., 1::2] << 4) & 0xF0))
-            np.savez(self.images_dir / f"{step}.npz", images_to_save)
+            np.savez(
+                self.images_dir / f"{step}.npz",
+                images_to_save,
+                indices=sae_indices_img,
+                weights=sae_weights_img,
+            )
         nums, indices, activations = make_feat_data(sae_indices_img, sae_weights_img, images, step, batch_size, img_seq_len, k, use_img)
         self.feature_acts.insert_many(nums, indices, activations)
 

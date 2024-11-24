@@ -47,7 +47,7 @@ def cached_image(step: int, image_id: int):
 def top_features():
     counts = scored_storage.key_counts()
     frequencies = counts.astype(np.float64) / counts.sum()
-    expected_frequency = 1 / counts.size
+    expected_frequency = 4 / counts.size
     correct_order = np.argsort(np.abs(frequencies - expected_frequency))
     top_few = correct_order[:16].tolist()
     return JSONResponse([(i, float(frequencies[i])) for i in top_few])
