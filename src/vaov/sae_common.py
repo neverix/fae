@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from dataclasses import dataclass
 from jaxtyping import Array, Float, UInt
-from typing import Literal
+from typing import Literal, Optional
 import numpy as np
 from functools import partial
 from collections import defaultdict
@@ -42,7 +42,7 @@ nf4 = np.asarray(
 @dataclass(frozen=True)
 class SAEConfig:
     d_model: int = 3072
-    n_features: int = 65536
+    n_features: int = 16384
 
     do_update: bool = True
 
@@ -50,16 +50,20 @@ class SAEConfig:
     bias_dtype: jax.typing.DTypeLike = jnp.float32
     clip_data: float = 64.0
 
-    k: int = 128
-    aux_k: int = 128
-    aux_k_coeff: float = 1/32
-    dead_after: int = 1_000
+    k: int = 64
+    aux_k: int = 512
+    aux_k_coeff: float = 1/16
+    dead_after_tokens: int = 1_000_000
+
+    @property
+    def dead_after(self):
+        return self.dead_after_tokens // self.full_batch_size
 
     batch_size: int = 4
     seq_len: int = 768
     seq_mode: Literal["both", "txt", "img"] = "both"
     n_steps: int = 100_000
-    wandb_name: tuple[str, str] = ("neverix", "vaov")
+    wandb_name: Optional[tuple[str, str]] = ("neverix", "vaov")
 
     tp_size: int = jax.local_device_count()
 

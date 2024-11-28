@@ -5,6 +5,7 @@ from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec as P
 from datasets import load_dataset
 from more_itertools import chunked
+from pygments.formatters import TerminalTrueColorFormatter
 from .ensemble import FluxEnsemble
 from dataclasses import dataclass, replace
 from functools import partial
@@ -124,8 +125,12 @@ class SAEInfo(eqx.Module):
         else:
             updated_avg_norm = self.avg_norm
 
-        activations = jnp.zeros(self.feature_density.shape).at[outputs.k_indices.flatten()].add(1)
-        new_feature_density = activations / self.config.full_batch_size
+        activations = jnp.zeros(
+            self.feature_density.shape, dtype=jnp.uint32
+        ).at[outputs.k_indices.flatten()].add(1)
+        # new_feature_density = activations / self.config.full_batch_size
+        # so it's easier to see
+        new_feature_density = (activations > 0).astype(jnp.float32)
         updated_feature_density = self.feature_density * weighting_factor + new_feature_density * new_weighting_factor
 
         updated_activated_in = jnp.where(activations > 0, 0, self.activated_in + 1)
@@ -210,6 +215,8 @@ class SAE(eqx.Module):
         )
         W_dec = W_enc.T
         W_dec = W_dec / jnp.linalg.norm(W_dec, axis=-1, keepdims=True)
+        # mimic kaiming init
+        W_enc = W_enc * math.sqrt(config.n_features / config.d_model) / math.sqrt(3)
         return cls(
             config=config,
             b_pre=jnp.zeros((config.d_model,), dtype=config.bias_dtype),
@@ -228,7 +235,7 @@ class SAE(eqx.Module):
             -self.config.clip_data,
             self.config.clip_data,
         )
-        encodings = (x_normed - self.b_post - self.b_pre) @ self.W_enc
+        encodings = (x_normed - self.b_post + self.b_pre) @ self.W_enc
         weights, indices = jax.lax.approx_max_k(encodings, self.config.k)
         decoded = sparse_matmul(weights, indices, self.W_dec)
         y_normed = decoded + self.b_post
@@ -237,14 +244,15 @@ class SAE(eqx.Module):
 
         dead_activated_in, dead_indices = jax.lax.top_k(info.activated_in, self.config.aux_k)
         dead_weights = encodings[..., dead_indices]
+        dead_condition = dead_activated_in > self.config.dead_after
         dead_weights = jnp.where(
-            dead_activated_in > self.config.dead_after, dead_weights, 0
+            dead_condition, dead_weights, 0
         )
 
         dead_indices = jnp.broadcast_to(dead_indices, dead_weights.shape)
         aux_y_normed = sparse_matmul(dead_weights, dead_indices, self.W_dec) + self.b_post
         aux_k_loss = jnp.mean(jnp.square(x_normed - aux_y_normed), axis=-1)
-        aux_k_loss = jnp.where(info.n_steps >= self.config.dead_after, aux_k_loss, 0)
+        aux_k_loss = jnp.where(dead_condition.any(), aux_k_loss, 0)
 
         loss = recon_loss + self.config.aux_k_coeff * aux_k_loss
 
@@ -499,7 +507,7 @@ class SAEOverseer:
         self.bar.last_print_n = int(self.sae_trainer.sae_logic.info.n_steps)
 
 
-def main(train_mode=False):
+def main(train_mode=True):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("k-mktr/improved-flux-prompts")
     prompts_iterator = prompts_dataset["train"]["prompt"]
