@@ -118,7 +118,7 @@ class ScoredStorage:
             return []
         num_entries = self.db[key, 0, 0]
         entries = []
-        for entry_idx in range(1, num_entries + 1):
+        for entry_idx in range(1, min(self.db.shape[1], num_entries + 1)):
             score = float(self.db[key, entry_idx, 0].view(np.float32))
             params = tuple(map(int, self.db[key, entry_idx, 1:]))
             entries.append((params, score))

@@ -52,15 +52,15 @@ class SAEConfig:
 
     k: int = 64
     aux_k: int = 512
-    aux_k_coeff: float = 1/16
+    aux_k_coeff: float = 1/32
     dead_after_tokens: int = 1_000_000
 
     @property
     def dead_after(self):
         return self.dead_after_tokens // self.full_batch_size
 
-    batch_size: int = 4
-    seq_len: int = 768
+    batch_size: int = 8
+    seq_len: int = 512 + 256
     seq_mode: Literal["both", "txt", "img"] = "both"
     n_steps: int = 100_000
     wandb_name: Optional[tuple[str, str]] = ("neverix", "vaov")
@@ -69,13 +69,13 @@ class SAEConfig:
 
     learning_rate: float = 4e-4
     beta1: float = 0.9
-    beta2: float = 0.99
-    eps: float = 1e-8
+    beta2: float = 0.999
+    eps: float = 1e-10
     ema: float = 0.995
-    grad_clip_threshold: float = 1.0
+    grad_clip_threshold: float = 0.85
     warmup_steps: int = 50
 
-    top_k_activations: int = 128
+    top_k_activations: int = 1024
     image_max: float = 5.0
 
     @property
@@ -174,8 +174,6 @@ class SAEOutputSaver(object):
             np.savez(
                 self.images_dir / f"{step}.npz",
                 images_to_save,
-                indices=sae_indices_img,
-                weights=sae_weights_img,
             )
         nums, indices, activations = make_feat_data(sae_indices_img, sae_weights_img, images, step, batch_size, img_seq_len, k, use_img)
         self.feature_acts.insert_many(nums, indices, activations)

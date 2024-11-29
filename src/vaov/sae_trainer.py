@@ -92,6 +92,7 @@ class SAEInfo(eqx.Module):
     weight_norms: dict
     weight_grad_norms: dict
     grad_clip_percent: Float[Array, ""]
+    grad_global_norm: Float[Array, ""]
 
     @classmethod
     def create(cls, config: SAEConfig, W_enc: Float[Array, "d_model n_features"]) -> "SAEInfo":
@@ -102,6 +103,7 @@ class SAEInfo(eqx.Module):
             feature_density=jnp.zeros((config.n_features,)),
             activated_in=jnp.zeros((config.n_features,), dtype=jnp.uint32),
             grad_clip_percent=jnp.zeros(()),
+            grad_global_norm=jnp.zeros(()),
             weight_norms=dict(W_enc=jnp.linalg.norm(W_enc), W_dec=jnp.linalg.norm(W_enc.T)),
             weight_grad_norms=dict(W_enc=jnp.zeros(()), W_dec=jnp.zeros(()))
         )
@@ -128,23 +130,25 @@ class SAEInfo(eqx.Module):
         activations = jnp.zeros(
             self.feature_density.shape, dtype=jnp.uint32
         ).at[outputs.k_indices.flatten()].add(1)
-        # new_feature_density = activations / self.config.full_batch_size
-        # so it's easier to see
-        new_feature_density = (activations > 0).astype(jnp.float32)
+        new_feature_density = activations / self.config.full_batch_size
+        # new_feature_density = (activations > 0).astype(jnp.float32)  # so it's easier to see'
         updated_feature_density = self.feature_density * weighting_factor + new_feature_density * new_weighting_factor
 
         updated_activated_in = jnp.where(activations > 0, 0, self.activated_in + 1)
 
         if self.config.do_update:
             # https://github.com/google-deepmind/optax/blob/63cdeb4ada95498626a52d209a029210ac066aa1/optax/transforms/_clipping.py#L91
+            new_grad_global_norm = global_norm(grads)
             new_grad_clip_percent = (
-                (global_norm(grads) > self.config.grad_clip_threshold)
+                (new_grad_global_norm > self.config.grad_clip_threshold)
                 .squeeze()
                 .astype(jnp.float32)
             )
             updated_grad_clip_percent = self.grad_clip_percent * weighting_factor + new_grad_clip_percent * new_weighting_factor
+            updated_grad_global_norm = self.grad_global_norm * weighting_factor + new_grad_global_norm * new_weighting_factor
         else:
             updated_grad_clip_percent = self.grad_clip_percent
+            updated_grad_global_norm = self.grad_global_norm
 
         new_weight_norms = dict(W_enc=jnp.linalg.norm(sae.W_enc), W_dec=jnp.linalg.norm(sae.W_dec))
         new_weight_grad_norms = dict(
@@ -156,6 +160,7 @@ class SAEInfo(eqx.Module):
             avg_norm=updated_avg_norm,
             feature_density=updated_feature_density,
             activated_in=updated_activated_in,
+            grad_global_norm=updated_grad_global_norm,
             grad_clip_percent=updated_grad_clip_percent,
             weight_norms=new_weight_norms,
             weight_grad_norms=new_weight_grad_norms
@@ -170,6 +175,7 @@ class SAEInfo(eqx.Module):
             feature_density=P("tp"),
             activated_in=P("tp"),
             grad_clip_percent=P(),
+            grad_global_norm=P(),
             weight_norms=dict(W_enc=P(), W_dec=P()),
             weight_grad_norms=dict(W_enc=P(), W_dec=P())
         )
@@ -416,8 +422,9 @@ class SAETrainer(eqx.Module):
             "recon_loss": sae_outputs.losses["recon_loss"].mean(),
             "aux_k_loss": sae_outputs.losses["aux_k_loss"].mean(),
             "loss": sae_outputs.loss.mean(),
+            "grad_global_norm": self.sae_logic.info.grad_global_norm,
             "grad_clip_percent": self.sae_logic.info.grad_clip_percent,
-            "feature_density": hist(self.sae_logic.info.feature_density),
+            "feature_density": hist(jnp.log(jnp.clip(self.sae_logic.info.feature_density, 1e-6, 1))),
             "activated_in": hist(self.sae_logic.info.activated_in),
             "data_norm": self.sae_logic.info.avg_norm,
             "fvu": sae_outputs.fvu.mean(),
@@ -509,8 +516,8 @@ class SAEOverseer:
 
 def main(train_mode=True):
     logger.info("Loading dataset")
-    prompts_dataset = load_dataset("k-mktr/improved-flux-prompts")
-    prompts_iterator = prompts_dataset["train"]["prompt"]
+    prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
+    prompts_iterator = prompts_dataset["train"]["caption_llava_short"]
     logger.info("Creating Flux")
     ensemble = FluxEnsemble(use_schnell=True, use_fsdp=True)
     logger.info("Creating SAE trainer")
