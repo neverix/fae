@@ -109,7 +109,12 @@ class ScoredStorage:
                 mode=self.mode,
                 shape=new_size
             )
-        _insert_many_jit(self.db, nums, indices, activations)
+        from loguru import logger
+        logger.info("actual insertion")
+        db = np.copy(self.db)
+        _insert_many_jit(db, nums, indices, activations)
+        logger.info("() flush")
+        self.db[...] = db
         self.db.flush()
 
 
@@ -128,4 +133,4 @@ class ScoredStorage:
         return self.db[:, 0, 0]
 
     def key_maxima(self) -> np.ndarray:
-        return self.db[:, 1, 0].view(np.float32)
+        return self.db[:, 1:, 0].view(np.float32).max(axis=1)

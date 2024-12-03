@@ -2,7 +2,7 @@ import os
 os.environ["JAX_PLATFORMS"] = "cpu"
 from fasthtml.common import fast_app, serve
 from fasthtml.common import FileResponse, JSONResponse
-from fasthtml.common import Img, Div, Card, P, Table, Tbody, Tr, Td, A
+from fasthtml.common import Img, Div, Card, P, Table, Tbody, Tr, Td, A, H1, H2
 from src.vaov.vae import FluxVAE
 from src.vaov.sae_common import SAEConfig, nf4
 from src.vaov.scored_storage import ScoredStorage
@@ -81,9 +81,7 @@ def maxacts(feature_id: int):
             grouped_rows[key] = np.zeros((HEIGHT, WIDTH), dtype=float)
 
         # Add score to the corresponding location in the grid
-        row_flat = grouped_rows[key].ravel()
-        # hack...
-        row_flat[h * 32 + w] = score
+        grouped_rows[key][h, w] = score
 
     # Prepare images and cards
     imgs = []
@@ -142,6 +140,11 @@ def maxacts(feature_id: int):
 
 @rt("/")
 def home():
-    return "<h1>Hello, World</h1>"
+    return Div(
+        H1("vaov"),
+        H2("SAE"),
+        P(A("Top features", href="/top_features")),
+        style="padding: 5em"
+    )
 
 serve()

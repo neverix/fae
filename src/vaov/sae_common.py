@@ -42,24 +42,25 @@ nf4 = np.asarray(
 @dataclass(frozen=True)
 class SAEConfig:
     d_model: int = 3072
-    n_features: int = 16384
+    n_features: int = 32768
 
     do_update: bool = True
 
     param_dtype: jax.typing.DTypeLike = jnp.float32
     bias_dtype: jax.typing.DTypeLike = jnp.float32
-    clip_data: float = 64.0
+    clip_data: Optional[float] = 16.0
 
-    k: int = 64
+    k: int = 128
     aux_k: int = 512
     aux_k_coeff: float = 1/32
-    dead_after_tokens: int = 1_000_000
+    dead_after_tokens: int = 200_000
+    death_threshold: float = 1.0
 
     @property
     def dead_after(self):
         return self.dead_after_tokens // self.full_batch_size
 
-    batch_size: int = 8
+    batch_size: int = 4
     seq_len: int = 512 + 256
     seq_mode: Literal["both", "txt", "img"] = "both"
     n_steps: int = 100_000
@@ -67,9 +68,9 @@ class SAEConfig:
 
     tp_size: int = jax.local_device_count()
 
-    learning_rate: float = 4e-4
+    learning_rate: float = 2e-4
     beta1: float = 0.9
-    beta2: float = 0.999
+    beta2: float = 0.99
     eps: float = 1e-10
     ema: float = 0.995
     grad_clip_threshold: float = 0.85
@@ -175,11 +176,16 @@ class SAEOutputSaver(object):
                 self.images_dir / f"{step}.npz",
                 images_to_save,
             )
-        nums, indices, activations = make_feat_data(sae_indices_img, sae_weights_img, images, step, batch_size, img_seq_len, k, use_img)
+        width = images.shape[-1] // 2
+        from loguru import logger
+        logger.info("Making feature data")
+        nums, indices, activations = make_feat_data(sae_indices_img, sae_weights_img, width, step, batch_size, img_seq_len, k, use_img)
+        logger.info("inserting")
         self.feature_acts.insert_many(nums, indices, activations)
+        logger.info("inserted")
 
 @nb.jit
-def make_feat_data(sae_indices_img, sae_weights_img, images, step, batch_size, img_seq_len, k, use_img):
+def make_feat_data(sae_indices_img, sae_weights_img, width, step, batch_size, img_seq_len, k, use_img):
     total_activations = sae_indices_img.size
     nums = np.empty(total_activations, dtype=np.uint32)
     indices = np.empty((total_activations, 4), dtype=np.uint32)
@@ -190,7 +196,7 @@ def make_feat_data(sae_indices_img, sae_weights_img, images, step, batch_size, i
             for x in range(img_seq_len):
                 for a in range(k):
                     feature_num, activation = int(sae_indices_img[i, x, a]), float(sae_weights_img[i, x, a])
-                    h, w = x // images.shape[2], x % images.shape[2]
+                    h, w = x // width, x % width
                     # new_data.append((feature_num, (step, i, h, w), activation))
                     nums[index] = feature_num
                     indices[index] = (step, i, h, w)

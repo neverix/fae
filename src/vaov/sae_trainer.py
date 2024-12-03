@@ -130,11 +130,14 @@ class SAEInfo(eqx.Module):
         activations = jnp.zeros(
             self.feature_density.shape, dtype=jnp.uint32
         ).at[outputs.k_indices.flatten()].add(1)
+        not_dead = jnp.zeros(
+            self.feature_density.shape, dtype=jnp.uint32
+        ).at[outputs.k_indices.flatten()].add(outputs.k_weights.flatten() > self.config.death_threshold)
         new_feature_density = activations / self.config.full_batch_size
         # new_feature_density = (activations > 0).astype(jnp.float32)  # so it's easier to see'
         updated_feature_density = self.feature_density * weighting_factor + new_feature_density * new_weighting_factor
 
-        updated_activated_in = jnp.where(activations > 0, 0, self.activated_in + 1)
+        updated_activated_in = jnp.where(not_dead > 0, 0, self.activated_in + 1)
 
         if self.config.do_update:
             # https://github.com/google-deepmind/optax/blob/63cdeb4ada95498626a52d209a029210ac066aa1/optax/transforms/_clipping.py#L91
@@ -236,11 +239,12 @@ class SAE(eqx.Module):
     def __call__(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
         info = jax.lax.stop_gradient(self.info)
         x_normed = info.norm(x)
-        x_normed = jnp.clip(
-            x_normed,
-            -self.config.clip_data,
-            self.config.clip_data,
-        )
+        if self.config.clip_data is not None:
+            x_normed = jnp.clip(
+                x_normed,
+                -self.config.clip_data,
+                self.config.clip_data,
+            )
         encodings = (x_normed - self.b_post + self.b_pre) @ self.W_enc
         weights, indices = jax.lax.approx_max_k(encodings, self.config.k)
         decoded = sparse_matmul(weights, indices, self.W_dec)
@@ -425,6 +429,7 @@ class SAETrainer(eqx.Module):
             "grad_global_norm": self.sae_logic.info.grad_global_norm,
             "grad_clip_percent": self.sae_logic.info.grad_clip_percent,
             "feature_density": hist(jnp.log(jnp.clip(self.sae_logic.info.feature_density, 1e-6, 1))),
+            "pct_dead": (self.sae_logic.info.activated_in > self.config.dead_after).mean(),
             "activated_in": hist(self.sae_logic.info.activated_in),
             "data_norm": self.sae_logic.info.avg_norm,
             "fvu": sae_outputs.fvu.mean(),
@@ -558,7 +563,7 @@ def main(train_mode=True):
         )
         assert isinstance(images, jnp.ndarray)  # to silence mypy
         logger.add(sys.stderr, level="INFO")
-        training_data = jnp.concatenate((reaped["double_img"][-1], reaped["double_txt"][-1]), axis=-2)
+        training_data = jnp.concatenate((reaped["double_txt"][-1], reaped["double_img"][-1]), axis=-2)
         training_data = config.cut_up(training_data)
         for v in reaped.values():
             v.delete()
