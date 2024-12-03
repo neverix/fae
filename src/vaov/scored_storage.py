@@ -126,3 +126,6 @@ class ScoredStorage:
 
     def key_counts(self) -> np.ndarray:
         return self.db[:, 0, 0]
+
+    def key_maxima(self) -> np.ndarray:
+        return self.db[:, 1, 0].view(np.float32)
