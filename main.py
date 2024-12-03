@@ -51,9 +51,9 @@ def top_features():
     frequencies = counts.astype(np.float64) / counts.sum()
     expected_frequency = 4 / counts.size
     metric = np.abs(frequencies - expected_frequency)
-    metric[maxima < 2] = np.inf
+    metric[maxima < 5] = np.inf
     correct_order = np.argsort(metric)
-    top_few = correct_order[:16].tolist()
+    top_few = correct_order[:256].tolist()
     return Div(
         *[Card(
             P(f"Feature {i}, Frequency: {frequencies[i]:.5f}, Max: {maxima[i]}"),
@@ -61,7 +61,6 @@ def top_features():
         ) for i in top_few],
         style="display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; padding: 20px;"
     )
-    # return JSONResponse([(i, float(frequencies[i])) for i in top_few])
 
 @rt("/feature_counts")
 def feature_counts():

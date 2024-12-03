@@ -177,12 +177,8 @@ class SAEOutputSaver(object):
                 images_to_save,
             )
         width = images.shape[-1] // 2
-        from loguru import logger
-        logger.info("Making feature data")
         nums, indices, activations = make_feat_data(sae_indices_img, sae_weights_img, width, step, batch_size, img_seq_len, k, use_img)
-        logger.info("inserting")
         self.feature_acts.insert_many(nums, indices, activations)
-        logger.info("inserted")
 
 @nb.jit
 def make_feat_data(sae_indices_img, sae_weights_img, width, step, batch_size, img_seq_len, k, use_img):

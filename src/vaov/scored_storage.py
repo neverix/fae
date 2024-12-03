@@ -1,4 +1,5 @@
 from typing import List, Tuple, Any, Dict
+from pathlib import Path
 import numpy as np
 import numba as nb
 import os
@@ -71,16 +72,15 @@ class ScoredStorage:
 
         unit_shape = (self.max_rows_per_key + 1, self.entry_len)
         if self.mode == "r":
-            unit_size = np.zeros(unit_shape, dtype=np.uint32).nbytes
-            n_records = os.path.getsize(db_path) // unit_size
+            read_path = Path(db_path)
+            self.db = np.load(read_path.with_suffix(read_path.suffix + ".npy"))
+            assert self.db.shape[1:] == unit_shape, f"Expected shape {unit_shape}, got {self.db.shape[1:]}"
         else:
             n_records = 1
-        self.db = np.memmap(
-            db_path,
-            dtype=np.uint32,
-            mode=mode,
-            shape=(n_records, *unit_shape)
-        )
+            self.db = np.zeros(
+                dtype=np.uint32,
+                shape=(n_records, *unit_shape)
+            )
 
     @property
     def entry_len(self):
@@ -99,24 +99,15 @@ class ScoredStorage:
         activations = np.asarray(activations)
         max_key = nums.max()
         if max_key >= self.db.shape[0]:
-            self.db.flush()
             old_size = self.db.shape[0]
             new_size = (max_key + 1,) + self.db.shape[1:]
             del self.db
-            self.db = np.memmap(
-                self.db_path,
+            self.db = np.zeros(
                 dtype=np.uint32,
-                mode=self.mode,
                 shape=new_size
             )
-        from loguru import logger
-        logger.info("actual insertion")
-        db = np.copy(self.db)
-        _insert_many_jit(db, nums, indices, activations)
-        logger.info("() flush")
-        self.db[...] = db
-        self.db.flush()
-
+        _insert_many_jit(self.db, nums, indices, activations)
+        np.save(self.db_path, self.db)
 
     def get_rows(self, key: int) -> List[Tuple[Tuple[Any, ...], float]]:
         if key < 0 or key >= self.db.shape[0]:
