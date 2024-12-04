@@ -90,7 +90,7 @@ class ScoredStorage:
     def record_len(self):
         return 1 + self.entry_len * self.max_rows_per_key
 
-    def insert_many(self, nums, indices, activations):
+    def insert_many(self, nums, indices, activations) -> np.ndarray:
         if "w" not in self.mode:
             raise ValueError("Database is not open for writing.")
 
@@ -119,6 +119,15 @@ class ScoredStorage:
             params = tuple(map(int, self.db[key, entry_idx, 1:]))
             entries.append((params, score))
         return entries
+
+    def all_rows(self):
+        all_rows = self.db[:, 1:, :].reshape(-1, self.db.shape[-1])
+        scores, rows = all_rows[..., 0].view(np.float32), all_rows[..., 1:]
+        mask = (np.arange(self.db.shape[1] - 1)[None, :] < self.db[:, 0, 0][:, None]).flatten()
+        return rows, scores, mask
+
+    def __len__(self):
+        return self.db.shape[0]
 
     def key_counts(self) -> np.ndarray:
         return self.db[:, 0, 0]

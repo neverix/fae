@@ -252,17 +252,15 @@ class SAE(eqx.Module):
         recon_loss = jnp.mean(jnp.square(x_normed - y_normed), axis=-1)
         y = info.denorm(y_normed)
 
-        dead_activated_in, dead_indices = jax.lax.top_k(info.activated_in, self.config.aux_k)
-        dead_weights = encodings[..., dead_indices]
-        dead_condition = dead_activated_in > self.config.dead_after
-        dead_weights = jnp.where(
-            dead_condition, dead_weights, 0
+        dead_condition = info.activated_in > self.config.dead_after
+        dead_weights, dead_indices = jax.lax.approx_max_k(
+            jnp.where(dead_condition, encodings, -jnp.inf),
+            self.config.aux_k
         )
 
-        dead_indices = jnp.broadcast_to(dead_indices, dead_weights.shape)
         aux_y_normed = sparse_matmul(dead_weights, dead_indices, self.W_dec) + self.b_post
         aux_k_loss = jnp.mean(jnp.square(x_normed - aux_y_normed), axis=-1)
-        aux_k_loss = jnp.where(dead_condition.any(), aux_k_loss, 0)
+        aux_k_loss = jnp.where(dead_condition.sum() >= self.config.aux_k, aux_k_loss, 0)
 
         loss = recon_loss + self.config.aux_k_coeff * aux_k_loss
 

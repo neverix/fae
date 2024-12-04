@@ -138,10 +138,10 @@ class SAEOutputSaver(object):
         if save_dir.exists():
             logger.warning(f"Deleting {save_dir} for saving")
             shutil.rmtree(save_dir)
-        special_dirs = save_dir / "images", save_dir / "texts", save_dir / "activations"
+        special_dirs = save_dir / "images", save_dir / "texts", save_dir / "activations", save_dir / "image_activations"
         for dir in special_dirs:
             dir.mkdir(parents=True, exist_ok=True)
-        self.images_dir, self.texts_dir, self.activations_dir = special_dirs
+        self.images_dir, self.texts_dir, self.activations_dir, self.image_activations_dir = special_dirs
         self.feature_acts = ScoredStorage(
             save_dir / "feature_acts.db",
             4, config.top_k_activations
@@ -179,6 +179,26 @@ class SAEOutputSaver(object):
         width = images.shape[-1] // 2
         nums, indices, activations = make_feat_data(sae_indices_img, sae_weights_img, width, step, batch_size, img_seq_len, k, use_img)
         self.feature_acts.insert_many(nums, indices, activations)
+        rows, _scores, mask = self.feature_acts.all_rows()
+        used_rows = rows[:, :-2][mask].astype(np.uint64)
+        unique_idces = np.unique(used_rows[:, 0] * batch_size + used_rows[:, 1])
+        unique_rows = np.stack((unique_idces // batch_size, unique_idces % batch_size), axis=1)
+        extant_images = set(tuple(map(int, r)) for r in unique_rows)
+        self.image_activations_dir.mkdir(parents=True, exist_ok=True)
+        for image in self.image_activations_dir.glob("*.npz"):
+            identifier = tuple(map(int, image.stem.split("_")))
+            if identifier not in extant_images:
+                image.unlink()
+        for i in range(batch_size):
+            identifier = step, i
+            if identifier not in extant_images:
+                continue
+            np.savez(
+                self.image_activations_dir / f"{'_'.join(map(str, identifier))}.npz",
+                sae_indices_img[i],
+                sae_weights_img[i],
+            )
+
 
 @nb.jit
 def make_feat_data(sae_indices_img, sae_weights_img, width, step, batch_size, img_seq_len, k, use_img):
