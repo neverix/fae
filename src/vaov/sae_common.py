@@ -52,7 +52,7 @@ class SAEConfig:
 
     k: int = 128
     aux_k: int = 512
-    aux_k_coeff: float = 1/32
+    aux_k_coeff: float = 0.125
     dead_after_tokens: int = 200_000
     death_threshold: float = 1.0
 
