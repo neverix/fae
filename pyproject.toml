@@ -7,9 +7,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "datasets>=2.19.1",
     "einops>=0.8.0",
     "equinox>=0.11.5",
     "fastapi>=0.115.4",
+    "fh-plotly>=0.1.1",
     "flax>=0.9.0",
     "jax-smi>=1.0.4",
     "jax[tpu]>=0.4.34",
@@ -17,14 +19,19 @@ dependencies = [
     "libtpu-nightly",
     "loguru>=0.7.2",
     "matplotlib>=3.9.2",
+    "more-itertools>=10.5.0",
+    "numba>=0.60.0",
     "onnx>=1.17.0",
     "orbax>=0.1.9",
     "oryx>=0.2.7",
+    "plotly-express>=0.4.1",
+    "python-fasthtml>=0.10.0",
     "qax>=0.4.1",
     "sentencepiece>=0.2.0",
     "torch>=2.4.1",
     "transformers>=4.44.2",
     "uvicorn>=0.32.0",
+    "wandb>=0.18.7",
 ]
 
 [build-system]

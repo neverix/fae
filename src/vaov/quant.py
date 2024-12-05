@@ -16,28 +16,6 @@ from jax.sharding import PartitionSpec as P
 import qax
 
 
-nf4 = jnp.asarray(
-    [
-        -1.0,
-        -0.6961928009986877,
-        -0.5250730514526367,
-        -0.39491748809814453,
-        -0.28444138169288635,
-        -0.18477343022823334,
-        -0.09105003625154495,
-        0.0,
-        0.07958029955625534,
-        0.16093020141124725,
-        0.24611230194568634,
-        0.33791524171829224,
-        0.44070982933044434,
-        0.5626170039176941,
-        0.7229568362236023,
-        1.0,
-    ]
-)
-
-
 USE_KERNEL = False
 
 BIG_POLYNOMIAL = False
@@ -101,7 +79,29 @@ def nf4xf32_to_f32(x):
         - 0.994166218659335
     )
 
-approx_nf4 = nf4xf32_to_f32(jnp.arange(16))
+
+with jax.default_device(jax.devices("cpu")[0]):
+    nf4 = jnp.asarray(
+        [
+            -1.0,
+            -0.6961928009986877,
+            -0.5250730514526367,
+            -0.39491748809814453,
+            -0.28444138169288635,
+            -0.18477343022823334,
+            -0.09105003625154495,
+            0.0,
+            0.07958029955625534,
+            0.16093020141124725,
+            0.24611230194568634,
+            0.33791524171829224,
+            0.44070982933044434,
+            0.5626170039176941,
+            0.7229568362236023,
+            1.0,
+        ]
+    )
+    approx_nf4 = nf4xf32_to_f32(jnp.arange(16))
 
 
 def nf4xf32_to_f32_eqmul(x):
@@ -286,7 +286,7 @@ def matmul_nf4_kernel(
     scale = scale_ref[...]
 
     if quants.dtype == jnp.int8:
-        w1 = (quants.astype(jnp.float32) / 127.5) * scale.astype(jnp.float32) 
+        w1 = (quants.astype(jnp.float32) / 127.5) * scale.astype(jnp.float32)
     else:
         quants = i4tou4(quants.astype(jnp.int32))
         quants = nf4xf32_to_f32(quants)
@@ -294,7 +294,7 @@ def matmul_nf4_kernel(
         w1 = quants * scale
     inputs = inputs_ref[...]
     accum_ref[...] += jnp.dot(inputs, w1.reshape(block_k, -1), preferred_element_type=jnp.float32)
-    
+
     @pl.when(pl.program_id(axis=2) == (pl.num_programs(axis=2) - 1))
     def _():
         outputs_ref[...] = accum_ref[...].astype(outputs_ref.dtype)
@@ -454,7 +454,7 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=True):
             use_approx=self.use_approx, use_kernel=self.use_kernel, orig_dtype=self.orig_dtype,
             mesh_and_axis=self.mesh_and_axis
         )
-        
+
 
     def materialize(self):
         if self.use_kernel:
@@ -561,7 +561,7 @@ def dot_general_handler(
                                             use_approx=b.use_approx,
                                             orig_dtype=og_dtype,
                                             mode="i8" if b.quants.dtype == jnp.int8 else "nf4")).astype(compute_dtype)
-        
+
     if b.mesh_and_axis is not None:
         mesh, map_axis = b.mesh_and_axis
         tensors = b.quants, b.scales
@@ -616,7 +616,7 @@ def dot_general_handler(
             def matmul(inputs, *tensors):
                 axis_size = jax.lax.psum(1, axis_name="fsdp")
                 axis_index = jax.lax.axis_index(axis_name="fsdp")
-                
+
                 accum = jnp.zeros((inputs.shape[0], inputs.shape[1], b.shape[1]), dtype=compute_dtype)
                 def loop_body(i, args):
                     accum, inputs, tensors = args
@@ -666,7 +666,7 @@ def dot_general_handler(
 
 def quantize_groups(group, codebook, mode="nf4"):
     group = group.astype(jnp.float32)
-    
+
     scale = jnp.max(jnp.abs(group))
     scaled = group / scale
 
@@ -676,7 +676,7 @@ def quantize_groups(group, codebook, mode="nf4"):
     elif mode == "i8":
         scaled = scaled * 127.5 - 0.5
         quants = jnp.clip(scaled.round(), -128, 127).astype(jnp.int8)
-    
+
     return quants, scale
 
 @partial(jax.jit, static_argnames=("use_approx", "group_size", "mesh_and_axis", "quantize_groups", "codebook", "mode"))
@@ -804,7 +804,7 @@ if __name__ == "__main__":
         bar.set_postfix(max_mfu=max_mfu, best=best)
     print(f"Best MFU: {max_mfu:.2f} with {best}")
     exit()
-    
+
     # with jax.default_device(jax.devices("cpu")[0]):
     #     a, b, c = 512, 512, 512
 
@@ -832,7 +832,7 @@ if __name__ == "__main__":
     #     path = path.resolve()
     #     checkpointer.save(path / "struc", treedef)
     #     checkpointer.save(path / "aa", vals)
-        
+
     #     checkpointer = ocp.PyTreeCheckpointer()
     #     treedef_meta = checkpointer.metadata(path / "struc")
     #     sharding = jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0])
@@ -850,7 +850,7 @@ if __name__ == "__main__":
     #     )
     #     restored_vals = checkpointer.restore(path / "aa",
     #                                             restore_args=restore_args)
-        
+
     #     _, restored_treedef = jax.tree_flatten(
     #         restored_treedef, is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue)
     #     )
@@ -867,7 +867,7 @@ if __name__ == "__main__":
     #     restored_quant_matrix = jax.tree_unflatten(restored_treedef, new_vals)
     #     print(jax.tree.map(lambda a, b: (a == b).all(), restored_quant_matrix, quant_matrix))
     # exit()
-    
+
     # shard_axis = None
     # mesh = jax.sharding.Mesh(np.array(jax.devices("tpu")).reshape(2, -1, 1), ("dp", "fsdp", "tp"))
     # quant_matrix = quant_matrix.with_mesh_and_axis((mesh, shard_axis))
@@ -877,7 +877,7 @@ if __name__ == "__main__":
     # inputs_device = jax.block_until_ready(inputs_device)
     # quant_matrix = jax.block_until_ready(quant_matrix)
     # super_quant = quant_matrix.stack(quant_matrix)
-    
+
     # @jax.jit
     # @qax.use_implicit_args
     # def h(a, b):
@@ -911,7 +911,7 @@ if __name__ == "__main__":
     # print((nf4xf32_to_f32_select(x) - nf4).tolist())
 
     a, b, c = 2**16, 2**15, 2**13
-    
+
 
     with jax.default_device(jax.devices("cpu")[0]):
         inputs = jax.random.normal(jax.random.key(0), (a, b), dtype=jnp.bfloat16)
