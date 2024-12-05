@@ -1,9 +1,9 @@
 # uv pip install jax[tpu]\>=0.4.31 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html --prerelease=allow
 
 [project]
-name = "vaov"
+name = "fae"
 version = "0.1.0"
-description = "Add your description here"
+description = "Flux SAE"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -28,7 +28,8 @@ dependencies = [
     "python-fasthtml>=0.10.0",
     "qax>=0.4.1",
     "sentencepiece>=0.2.0",
-    "torch>=2.4.1",
+    "torch==2.4.1+cpu",
+    "torchvision==0.19.1+cpu",
     "transformers>=4.44.2",
     "uvicorn>=0.32.0",
     "wandb>=0.18.7",

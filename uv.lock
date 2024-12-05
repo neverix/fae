@@ -399,6 +399,69 @@ epy = [
 ]
 
 [[package]]
+name = "fae"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "datasets" },
+    { name = "einops" },
+    { name = "equinox" },
+    { name = "fastapi" },
+    { name = "fh-plotly" },
+    { name = "flax" },
+    { name = "jax", extra = ["tpu"] },
+    { name = "jax-smi" },
+    { name = "jaxonnxruntime" },
+    { name = "libtpu-nightly" },
+    { name = "loguru" },
+    { name = "matplotlib" },
+    { name = "more-itertools" },
+    { name = "numba" },
+    { name = "onnx" },
+    { name = "orbax" },
+    { name = "oryx" },
+    { name = "plotly-express" },
+    { name = "python-fasthtml" },
+    { name = "qax" },
+    { name = "sentencepiece" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "transformers" },
+    { name = "uvicorn" },
+    { name = "wandb" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "datasets", specifier = ">=2.19.1" },
+    { name = "einops", specifier = ">=0.8.0" },
+    { name = "equinox", specifier = ">=0.11.5" },
+    { name = "fastapi", specifier = ">=0.115.4" },
+    { name = "fh-plotly", specifier = ">=0.1.1" },
+    { name = "flax", specifier = ">=0.9.0" },
+    { name = "jax", extras = ["tpu"], specifier = ">=0.4.34" },
+    { name = "jax-smi", specifier = ">=1.0.4" },
+    { name = "jaxonnxruntime", directory = "jort" },
+    { name = "libtpu-nightly", url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" },
+    { name = "loguru", specifier = ">=0.7.2" },
+    { name = "matplotlib", specifier = ">=3.9.2" },
+    { name = "more-itertools", specifier = ">=10.5.0" },
+    { name = "numba", specifier = ">=0.60.0" },
+    { name = "onnx", specifier = ">=1.17.0" },
+    { name = "orbax", specifier = ">=0.1.9" },
+    { name = "oryx", git = "https://github.com/jax-ml/oryx?rev=339bc9215962dc998637d53ca8f19a3cea100ec0" },
+    { name = "plotly-express", specifier = ">=0.4.1" },
+    { name = "python-fasthtml", specifier = ">=0.10.0" },
+    { name = "qax", specifier = ">=0.4.1" },
+    { name = "sentencepiece", specifier = ">=0.2.0" },
+    { name = "torch", specifier = "==2.4.1+cpu" },
+    { name = "torchvision", specifier = "==0.19.1+cpu" },
+    { name = "transformers", specifier = ">=4.44.2" },
+    { name = "uvicorn", specifier = ">=0.32.0" },
+    { name = "wandb", specifier = ">=0.18.7" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.115.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2101,13 +2164,13 @@ wheels = [
 
 [[package]]
 name = "sympy"
-version = "1.12"
+version = "1.13.1"
 source = { registry = "https://download.pytorch.org/whl/cpu" }
 dependencies = [
     { name = "mpmath" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/sympy-1.12-py3-none-any.whl", hash = "sha256:c3588cd4295d0c0f603d0f2ae780587e64e2efeedb3521e46b9bb1d08d184fa5" },
+    { url = "https://download.pytorch.org/whl/sympy-1.13.1-py3-none-any.whl", hash = "sha256:db36cdc64bf61b9b24578b6f7bab1ecdd2452cf008f34faa33776680c26d66f8" },
 ]
 
 [[package]]
@@ -2231,6 +2294,22 @@ wheels = [
 ]
 
 [[package]]
+name = "torchvision"
+version = "0.19.1+cpu"
+source = { registry = "https://download.pytorch.org/whl/cpu" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "torch" },
+]
+wheels = [
+    { url = "https://download.pytorch.org/whl/cpu/torchvision-0.19.1%2Bcpu-cp311-cp311-linux_x86_64.whl", hash = "sha256:6000f6747232ffc1e346caf2f3b7df30f6f084c93d5af21c5f0461dec0454a7b" },
+    { url = "https://download.pytorch.org/whl/cpu/torchvision-0.19.1%2Bcpu-cp311-cp311-win_amd64.whl", hash = "sha256:49d644cd562a022b43100e0f8f7cdbb17ef69d584120ad8fcb7e327741f3605b" },
+    { url = "https://download.pytorch.org/whl/cpu/torchvision-0.19.1%2Bcpu-cp312-cp312-linux_x86_64.whl", hash = "sha256:7207647b0ceb38cb72ac951e57807aaa58a6450d00ea5b542e4def992fec397b" },
+    { url = "https://download.pytorch.org/whl/cpu/torchvision-0.19.1%2Bcpu-cp312-cp312-win_amd64.whl", hash = "sha256:8c826a6bd5aca0ec09f1d7122a5491527ad3eb7d733fc81281be6f0c75f9783c" },
+]
+
+[[package]]
 name = "tqdm"
 version = "4.64.1"
 source = { registry = "https://download.pytorch.org/whl/cpu" }
@@ -2344,67 +2423,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d2/19/f5b78616566ea68edd42aacaf645adbf71fbd83fc52281fba555dc27e3f1/uvloop-0.21.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f3df876acd7ec037a3d005b3ab85a7e4110422e4d9c1571d4fc89b0fc41b6816", size = 4701068 },
     { url = "https://files.pythonhosted.org/packages/47/57/66f061ee118f413cd22a656de622925097170b9380b30091b78ea0c6ea75/uvloop-0.21.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:bd53ecc9a0f3d87ab847503c2e1552b690362e005ab54e8a48ba97da3924c0dc", size = 4454428 },
     { url = "https://files.pythonhosted.org/packages/63/9a/0962b05b308494e3202d3f794a6e85abe471fe3cafdbcf95c2e8c713aabd/uvloop-0.21.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:a5c39f217ab3c663dc699c04cbd50c13813e31d917642d459fdcec07555cc553", size = 4660018 },
-]
-
-[[package]]
-name = "vaov"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "datasets" },
-    { name = "einops" },
-    { name = "equinox" },
-    { name = "fastapi" },
-    { name = "fh-plotly" },
-    { name = "flax" },
-    { name = "jax", extra = ["tpu"] },
-    { name = "jax-smi" },
-    { name = "jaxonnxruntime" },
-    { name = "libtpu-nightly" },
-    { name = "loguru" },
-    { name = "matplotlib" },
-    { name = "more-itertools" },
-    { name = "numba" },
-    { name = "onnx" },
-    { name = "orbax" },
-    { name = "oryx" },
-    { name = "plotly-express" },
-    { name = "python-fasthtml" },
-    { name = "qax" },
-    { name = "sentencepiece" },
-    { name = "torch" },
-    { name = "transformers" },
-    { name = "uvicorn" },
-    { name = "wandb" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "datasets", specifier = ">=2.19.1" },
-    { name = "einops", specifier = ">=0.8.0" },
-    { name = "equinox", specifier = ">=0.11.5" },
-    { name = "fastapi", specifier = ">=0.115.4" },
-    { name = "fh-plotly", specifier = ">=0.1.1" },
-    { name = "flax", specifier = ">=0.9.0" },
-    { name = "jax", extras = ["tpu"], specifier = ">=0.4.34" },
-    { name = "jax-smi", specifier = ">=1.0.4" },
-    { name = "jaxonnxruntime", directory = "jort" },
-    { name = "libtpu-nightly", url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" },
-    { name = "loguru", specifier = ">=0.7.2" },
-    { name = "matplotlib", specifier = ">=3.9.2" },
-    { name = "more-itertools", specifier = ">=10.5.0" },
-    { name = "numba", specifier = ">=0.60.0" },
-    { name = "onnx", specifier = ">=1.17.0" },
-    { name = "orbax", specifier = ">=0.1.9" },
-    { name = "oryx", git = "https://github.com/jax-ml/oryx?rev=339bc9215962dc998637d53ca8f19a3cea100ec0" },
-    { name = "plotly-express", specifier = ">=0.4.1" },
-    { name = "python-fasthtml", specifier = ">=0.10.0" },
-    { name = "qax", specifier = ">=0.4.1" },
-    { name = "sentencepiece", specifier = ">=0.2.0" },
-    { name = "torch", specifier = ">=2.4.1" },
-    { name = "transformers", specifier = ">=4.44.2" },
-    { name = "uvicorn", specifier = ">=0.32.0" },
-    { name = "wandb", specifier = ">=0.18.7" },
 ]
 
 [[package]]

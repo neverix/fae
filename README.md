@@ -1,11 +1,13 @@
-# vaov
+# fae
+
+Flux implementation with SAEs
 
 ## Setup
 ```
 uv sync
 mkdir -p somewhere
 git lfs clone https://huggingface.co/nev/taef1 somewhere/taef1
-uv run python -m src.vaov.server
+uv run python -m src.fae.server
 ```
 
 ## Credits

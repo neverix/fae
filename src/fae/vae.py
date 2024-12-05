@@ -39,7 +39,7 @@ class FluxVAE(eqx.Module):
 # apt install git-lfs
 # mkdir -p somewhere
 # cd somewhere && git lfs clone https://huggingface.co/nev/taef1
-# uv pip install -U ./jort && rm -rf .venv && uv sync && JAX_PLATFORMS=cpu uv run python -m src.vaov.vae
+# uv pip install -U ./jort && rm -rf .venv && uv sync && JAX_PLATFORMS=cpu uv run python -m src.fae.vae
 if __name__ == "__main__":
     from PIL import Image
     import requests

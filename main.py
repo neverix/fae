@@ -3,9 +3,9 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 from fasthtml.common import fast_app, serve
 from fasthtml.common import FileResponse, JSONResponse
 from fasthtml.common import Img, Div, Card, P, Table, Tbody, Tr, Td, A, H1, H2
-from src.vaov.vae import FluxVAE
-from src.vaov.sae_common import SAEConfig, nf4
-from src.vaov.scored_storage import ScoredStorage
+from src.fae.vae import FluxVAE
+from src.fae.sae_common import SAEConfig, nf4
+from src.fae.scored_storage import ScoredStorage
 import numpy as np
 from pathlib import Path
 import shutil
@@ -152,7 +152,7 @@ def maxacts(feature_id: int):
 @rt("/")
 def home():
     return Div(
-        H1("vaov"),
+        H1("fae"),
         H2("SAE"),
         P(A("Top features", href="/top_features")),
         style="padding: 5em"

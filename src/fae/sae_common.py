@@ -51,10 +51,20 @@ class SAEConfig:
     clip_data: Optional[float] = 16.0
 
     k: int = 128
-    aux_k: int = 512
-    aux_k_coeff: float = 1/32
+    aux_k: int = 1024
+    aux_k_coeff: float = 1/64
     inv_min_density: int = 1024
-    death_threshold: float = 1.0
+    death_threshold_multiplier: float = 0.1
+
+    @property
+    def death_threshold(self):
+        expected_output_norm = self.d_model ** 0.5
+        norm_with_parallel = self.k
+        norm_with_orthogonal = self.k ** 0.5
+        max_act_norm = expected_output_norm / norm_with_orthogonal
+        min_act_norm = expected_output_norm / norm_with_parallel
+        expected_act_norm = (max_act_norm + min_act_norm) / 2
+        return expected_act_norm * self.death_threshold_multiplier
 
     @property
     def dead_after_tokens(self):

@@ -4,7 +4,7 @@ import sqlite3
 
 from fasthtml.components import S
 from transformers.models.flava.modeling_flava import _EXPECTED_IMAGE_OUTPUT_SHAPE
-from src.vaov.scored_storage import ScoredStorage
+from src.fae.scored_storage import ScoredStorage
 import random
 
 class TestScoredStorage(unittest.TestCase):
