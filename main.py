@@ -20,11 +20,16 @@ image_cache_dir = Path("somewhere/img_cache")
 if image_cache_dir.exists():
     shutil.rmtree(image_cache_dir)
 image_cache_dir.mkdir(parents=True, exist_ok=True)
-scored_storage = ScoredStorage(
-    cache_dir / "feature_acts.db",
-    4, SAEConfig.top_k_activations,
-    mode="r"
-)
+while True:
+    try:
+        scored_storage = ScoredStorage(
+            cache_dir / "feature_acts.db",
+            4, SAEConfig.top_k_activations,
+            mode="r"
+        )
+    except (ValueError, EOFError):
+        continue
+    break
 app, rt = fast_app(hdrs=plotly_headers)
 
 @rt("/cached_image/{step}/{image_id}")
@@ -85,6 +90,13 @@ def maxacts(feature_id: int):
     # Prepare images and cards
     imgs = []
     for (step, idx), grid in sorted(grouped_rows.items(), key=lambda x: x[1].max(), reverse=True):
+        full_activations = np.load(cache_dir / "image_activations" / f"{step}_{idx}.npz")
+        gravel = grid.ravel()
+        k = full_activations["arr_0"].shape[1]
+        for i, (f, w) in enumerate(zip(full_activations["arr_0"].ravel(), full_activations["arr_1"].ravel())):
+            if f == feature_id:
+                gravel[i // k] = w
+
         # Normalize the grid for color intensity
         normalized_grid = (grid - grid.min()) / (grid.max() - grid.min()) if grid.max() > grid.min() else grid
 

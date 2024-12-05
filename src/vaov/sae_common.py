@@ -42,7 +42,7 @@ nf4 = np.asarray(
 @dataclass(frozen=True)
 class SAEConfig:
     d_model: int = 3072
-    n_features: int = 32768
+    n_features: int = 65536
 
     do_update: bool = True
 
@@ -226,20 +226,12 @@ def make_feat_data(sae_indices_img, sae_weights_img, width, step, batch_size, im
 
                 # Map 1D index back to 2D coordinates
                 flat_idx = np.flatnonzero(mask)[max_idx]
-                x, a = np.unravel_index(flat_idx, (img_seq_len, k))
+                # x, a = np.unravel_index(flat_idx, (img_seq_len, k))
+                x, a = flat_idx // k, flat_idx % k
                 h, w = x // width, x % width
 
                 nums[index] = feature_num
                 indices[index] = (step, i, h, w)
                 activations[index] = batch_weights[flat_idx]
                 index += 1
-            # for x in range(img_seq_len):
-            #     for a in range(k):
-            #         feature_num, activation = int(sae_indices_img[i, x, a]), float(sae_weights_img[i, x, a])
-            #         h, w = x // width, x % width
-            #         # new_data.append((feature_num, (step, i, h, w), activation))
-            #         nums[index] = feature_num
-            #         indices[index] = (step, i, h, w)
-            #         activations[index] = activation
-            #         index += 1
-    return nums, indices, activations
+    return nums[:index], indices[:index], activations[:index]

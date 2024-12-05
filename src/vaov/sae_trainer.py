@@ -20,15 +20,12 @@ import jax.numpy as jnp
 import equinox as eqx
 import wandb
 import math
-import threading
-import shutil
 import jax
 import sys
-import os
 import json
 from pathlib import Path
 import orbax.checkpoint as ocp
-from typing import Sequence, Literal
+from typing import Sequence
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from .sae_common import SAEConfig, SAEOutputSaver
@@ -462,6 +459,7 @@ class SAEOverseer:
         if save_at:
             save_at = Path(save_at).resolve()
             if not restore:
+                logger.warning("Erasing model checkpoint at", save_at)
                 save_at = ocp.test_utils.erase_and_create_empty(save_at)
             self.save_at = save_at
             options = ocp.CheckpointManagerOptions(max_to_keep=1, save_interval_steps=save_every)
@@ -519,7 +517,7 @@ class SAEOverseer:
         self.bar.last_print_n = int(self.sae_trainer.sae_logic.info.n_steps)
 
 
-def main(train_mode=True):
+def main(train_mode=True, restore=False):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
     prompts_iterator = prompts_dataset["train"]["caption_llava_short"]
@@ -530,10 +528,13 @@ def main(train_mode=True):
         do_update=train_mode,
         seq_mode="img",
     )
+    if not train_mode and not restore:
+        logger.warning("Enabling restore")
+        restore = True
     sae_trainer = SAEOverseer(
         config,
         save_every=None if not train_mode else 1000,
-        restore="somewhere/sae_mid" if not train_mode else None,
+        restore="somewhere/sae_mid" if restore else None,
     )
     if not train_mode:
         saver = SAEOutputSaver(config, Path("somewhere/maxacts"))
