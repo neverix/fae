@@ -118,7 +118,7 @@ class SAEInfo(eqx.Module):
     def denorm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
         return x / self.tgt_norm * self.avg_norm
 
-    def step(self, sae: "SAE", grads: "SAE", updates: "SAE", outputs: SAEOutput):
+    def step(self, sae: "SAE", updates: "SAE", grads: "SAE", outputs: SAEOutput):
         weighting_factor, new_weighting_factor = self.n_steps / (self.n_steps + 1), 1 / (self.n_steps + 1)
 
         if self.config.do_update:
@@ -148,7 +148,8 @@ class SAEInfo(eqx.Module):
                 .astype(jnp.float32)
             )
             updated_grad_clip_percent = self.grad_clip_percent * weighting_factor + new_grad_clip_percent * new_weighting_factor
-            updated_grad_global_norm = self.grad_global_norm * weighting_factor + new_grad_global_norm * new_weighting_factor
+            # updated_grad_global_norm = self.grad_global_norm * weighting_factor + new_grad_global_norm * new_weighting_factor
+            updated_grad_global_norm = new_grad_global_norm
         else:
             updated_grad_clip_percent = self.grad_clip_percent
             updated_grad_global_norm = self.grad_global_norm
@@ -267,7 +268,7 @@ class SAE(eqx.Module):
 
         fvu = jnp.mean(jnp.square(x_normed - y_normed)) / jnp.mean(jnp.square(x_normed))
         correlation = ((x_normed - x_normed.mean(axis=0)) * (y_normed - y_normed.mean(axis=0))).mean(axis=0)
-        var_explained = (jnp.square(correlation) / (
+        var_explained = jnp.nan_to_num(jnp.square(correlation) / (
             jnp.var(x_normed, axis=0) * jnp.var(y_normed, axis=0)
         )).mean()
 

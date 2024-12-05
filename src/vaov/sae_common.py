@@ -52,9 +52,13 @@ class SAEConfig:
 
     k: int = 128
     aux_k: int = 512
-    aux_k_coeff: float = 0.125
-    dead_after_tokens: int = 200_000
+    aux_k_coeff: float = 1/32
+    inv_min_density: int = 1024
     death_threshold: float = 1.0
+
+    @property
+    def dead_after_tokens(self):
+        return self.inv_min_density * self.n_features // self.k
 
     @property
     def dead_after(self):
@@ -68,12 +72,12 @@ class SAEConfig:
 
     tp_size: int = jax.local_device_count()
 
-    learning_rate: float = 2e-4
-    beta1: float = 0.9
+    learning_rate: float = 6e-4
+    beta1: float = 0.0
     beta2: float = 0.99
     eps: float = 1e-10
     ema: float = 0.995
-    grad_clip_threshold: float = 0.85
+    grad_clip_threshold: float = 10.0
     warmup_steps: int = 50
 
     top_k_activations: int = 1024
@@ -179,11 +183,13 @@ class SAEOutputSaver(object):
         width = images.shape[-1] // 2
         nums, indices, activations = make_feat_data(sae_indices_img, sae_weights_img, width, step, batch_size, img_seq_len, k, use_img)
         self.feature_acts.insert_many(nums, indices, activations)
+
         rows, _scores, mask = self.feature_acts.all_rows()
         used_rows = rows[:, :-2][mask].astype(np.uint64)
         unique_idces = np.unique(used_rows[:, 0] * batch_size + used_rows[:, 1])
         unique_rows = np.stack((unique_idces // batch_size, unique_idces % batch_size), axis=1)
         extant_images = set(tuple(map(int, r)) for r in unique_rows)
+
         self.image_activations_dir.mkdir(parents=True, exist_ok=True)
         for image in self.image_activations_dir.glob("*.npz"):
             identifier = tuple(map(int, image.stem.split("_")))
@@ -209,13 +215,31 @@ def make_feat_data(sae_indices_img, sae_weights_img, width, step, batch_size, im
     index = 0
     for i in range(batch_size):
         if use_img:
-            for x in range(img_seq_len):
-                for a in range(k):
-                    feature_num, activation = int(sae_indices_img[i, x, a]), float(sae_weights_img[i, x, a])
-                    h, w = x // width, x % width
-                    # new_data.append((feature_num, (step, i, h, w), activation))
-                    nums[index] = feature_num
-                    indices[index] = (step, i, h, w)
-                    activations[index] = activation
-                    index += 1
+            batch_features = sae_indices_img[i].ravel()
+            batch_weights = sae_weights_img[i].ravel()
+            unique_features = np.unique(batch_features)
+
+            for feature_num in unique_features:
+                # Find max activation for this feature
+                mask = batch_features == feature_num
+                max_idx = np.argmax(batch_weights[mask])
+
+                # Map 1D index back to 2D coordinates
+                flat_idx = np.flatnonzero(mask)[max_idx]
+                x, a = np.unravel_index(flat_idx, (img_seq_len, k))
+                h, w = x // width, x % width
+
+                nums[index] = feature_num
+                indices[index] = (step, i, h, w)
+                activations[index] = batch_weights[flat_idx]
+                index += 1
+            # for x in range(img_seq_len):
+            #     for a in range(k):
+            #         feature_num, activation = int(sae_indices_img[i, x, a]), float(sae_weights_img[i, x, a])
+            #         h, w = x // width, x % width
+            #         # new_data.append((feature_num, (step, i, h, w), activation))
+            #         nums[index] = feature_num
+            #         indices[index] = (step, i, h, w)
+            #         activations[index] = activation
+            #         index += 1
     return nums, indices, activations
