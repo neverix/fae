@@ -3,6 +3,8 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from .vae import FluxVAE
 import jax.numpy as jnp
+from src.fae.ensemble import FluxEnsemble
+from loguru import logger
 import jax
 
 # Define transformations: center crop, resize to 512x512, and convert to tensor
@@ -19,18 +21,15 @@ dataset = datasets.ImageFolder(root="somewhere/finetune_data", transform=transfo
 # DataLoader to iterate through the dataset in batches of size 4
 data_loader = DataLoader(dataset, batch_size=4, shuffle=True)
 
-# Load the pre-trained VAE model
-device = jax.devices("cpu")[0]
-with jax.default_device(device):
-    vae = FluxVAE("somewhere/taef1/taef1_encoder.onnx", "somewhere/taef1/taef1_decoder.onnx")
+# Load the Flux model
+ensemble = FluxEnsemble(use_schnell=False, use_fsdp=True)
 
 # Iterate through batches
+texts = ["Background"]
 for batch_idx, (images, labels) in enumerate(data_loader):
-    print(f"Batch {batch_idx + 1}")
-    print(f"Images shape: {images.shape}")  # Should be (4, 3, 512, 512) for RGB images
-    print(f"Images max: {images.max()}, min: {images.min()}")
-    print(f"Labels: {labels}")
-    with jax.default_device(device):
-        encoded = vae.encode(jnp.asarray(images.numpy()))
-        print(f"Encoded shape: {encoded.shape}")
-        print(f"Encoded mean: {encoded.mean()}, std: {encoded.std()}")
+    text_batch = [texts[i] for i in labels]
+    inputs = ensemble.prepare_stuff(
+        text_batch, images=jnp.asarray(images.numpy()),
+        image_input_kwargs=dict(already_preprocessed=True, timesteps=None))
+    image_output = ensemble.flux(*inputs)
+    logger.info(f"{image_output.loss}")

@@ -50,24 +50,32 @@ class SAEConfig:
     bias_dtype: jax.typing.DTypeLike = jnp.float32
     clip_data: Optional[float] = 16.0
 
-    k: int = 128
+    k: int = 48
     aux_k: int = 1024
-    aux_k_coeff: float = 1/64
+    aux_k_coeff: float = 1/32
+    aux_k_variant: Literal["openai", "mine"] = "mine"
+    death_threshold_multiplier: float = 0.5
+    _death_threshold: Optional[float] = -jnp.inf  # 0.5
     inv_min_density: int = 1024
-    death_threshold_multiplier: float = 0.1
+    _dead_after_tokens: Optional[int] = 524288
 
     @property
     def death_threshold(self):
+        if self._death_threshold is not None:
+            return self._death_threshold
         expected_output_norm = self.d_model ** 0.5
         norm_with_parallel = self.k
         norm_with_orthogonal = self.k ** 0.5
         max_act_norm = expected_output_norm / norm_with_orthogonal
         min_act_norm = expected_output_norm / norm_with_parallel
-        expected_act_norm = (max_act_norm + min_act_norm) / 2
+        # expected_act_norm = (max_act_norm + min_act_norm) / 2
+        expected_act_norm = max_act_norm
         return expected_act_norm * self.death_threshold_multiplier
 
     @property
     def dead_after_tokens(self):
+        if self._dead_after_tokens is not None:
+            return self._dead_after_tokens
         return self.inv_min_density * self.n_features // self.k
 
     @property
@@ -78,7 +86,7 @@ class SAEConfig:
     seq_len: int = 512 + 256
     seq_mode: Literal["both", "txt", "img"] = "both"
     n_steps: int = 100_000
-    wandb_name: Optional[tuple[str, str]] = ("neverix", "vaov")
+    wandb_name: Optional[tuple[str, str]] = ("neverix", "fae")
 
     tp_size: int = jax.local_device_count()
 

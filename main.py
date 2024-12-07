@@ -54,10 +54,11 @@ def top_features():
     counts = scored_storage.key_counts()
     maxima = scored_storage.key_maxima()
     frequencies = counts.astype(np.float64) / counts.sum()
-    expected_frequency = 4 / counts.size
-    metric = np.abs(frequencies - expected_frequency)
-    metric[maxima < 5] = np.inf
-    correct_order = np.argsort(metric)
+    # expected_frequency = 4 / counts.size
+    # metric = np.abs(frequencies - expected_frequency)
+    # metric[maxima < 5] = np.inf
+    # correct_order = np.argsort(metric)
+    correct_order = np.random.permutation(np.arange(len(scored_storage)))
     top_few = correct_order[:256].tolist()
     return Div(
         *[Card(

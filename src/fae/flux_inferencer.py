@@ -133,6 +133,10 @@ class ImageOutput(DotDict):
             guidance_scale=self.previous_input.guidance_scale,
         )
 
+    @property
+    def loss(self):
+        return jnp.mean(jnp.square(self.ground_truth - self.prediction))  # simple as that
+
 
 @partial(jax.jit, static_argnums=(1,), static_argnames=("debug_mode", "debug_interp"))
 @qax.use_implicit_args
@@ -147,7 +151,7 @@ def run_model_(weights, logic, kwargs, debug_mode=False, debug_interp=True):
     if debug_mode:
         return results, aux
     return results
-    
+
     (results, debug_results), interp_results = results
     if debug_mode:
         if debug_interp:
@@ -162,7 +166,7 @@ class FluxInferencer(eqx.Module):
     vae: FluxVAE
     logic: DiFormer
     weights: DiFormer
-    
+
     def __init__(
         self,
         mesh,
@@ -258,12 +262,16 @@ class FluxInferencer(eqx.Module):
             vec_in=vec_in,
         )
 
-    def image_input(self, images, timesteps=0, guidance_scale=3.5, key=None):
+    def image_input(self, images, timesteps=0, guidance_scale=3.5, key=None,
+                    already_preprocessed=False, already_encoded=False):
         # fixme: OOM otherwise
         with jax.default_device(jax.devices("cpu")[0]):
-            encoded = self.vae.encode(
-                jnp.concatenate([self.vae.preprocess(image) for image in images], 0)
-            )
+            if not already_preprocessed:
+                images = jnp.concatenate([self.vae.preprocess(image) for image in images], 0)
+            if not already_encoded:
+                encoded = self.vae.encode(images)
+            else:
+                encoded = images
         encoded = encoded.astype(jnp.float32)
         if encoded.shape[-1] % 2:
             encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 0), (0, 1)))
@@ -273,6 +281,8 @@ class FluxInferencer(eqx.Module):
         batch = encoded.shape[0]
         if isinstance(timesteps, (int, float)):
             timesteps = jnp.full((batch,), timesteps, dtype=jnp.float32)
+        elif timesteps is None:
+            timesteps = jax.random.uniform(key, (batch,), dtype=jnp.float32)
         key = random_or(key)
         noise = jax.random.normal(key, encoded.shape, dtype=encoded.dtype)
 
@@ -292,7 +302,7 @@ class FluxInferencer(eqx.Module):
 def main():
     import jax_smi
     jax_smi.initialise_tracking()
-    
+
     logger.info("Creating inputs")
 
     import requests
@@ -356,7 +366,7 @@ def main():
             )
         )
         print({k: v.shape for k, v in result.reaped.items()})
-    
+
     logger.info("Saving results")
     vae = inferencer.vae
     denoised = result.denoised[0, :1]

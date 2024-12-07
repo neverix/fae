@@ -257,8 +257,11 @@ class SAE(eqx.Module):
         )
         dead_weights = jnp.nan_to_num(dead_weights, neginf=0.0)
 
-        aux_y_normed = sparse_matmul(dead_weights, dead_indices, self.W_dec) + self.b_post
-        aux_k_loss = jnp.mean(jnp.square(x_normed - aux_y_normed), axis=-1)
+        aux_y_normed = sparse_matmul(dead_weights, dead_indices, self.W_dec)
+        if self.config.aux_k_variant == "openai":
+            aux_k_loss = jnp.mean(jnp.square((y_normed - x_normed) - aux_y_normed), axis=-1)
+        else:
+            aux_k_loss = jnp.mean(jnp.square(y_normed - (aux_y_normed + self.b_post)), axis=-1)
         aux_k_loss = jnp.where(dead_condition.any(), aux_k_loss, 0)
 
         loss = recon_loss + self.config.aux_k_coeff * aux_k_loss

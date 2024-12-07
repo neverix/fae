@@ -5,6 +5,7 @@ from typing import List
 import jax.numpy as jnp
 import numpy as np
 from PIL import Image
+from transformers.models.imagegpt.modeling_imagegpt import IMAGEGPT_INPUTS_DOCSTRING
 from .clip import CLIPInterface
 from .t5 import T5EncoderInferencer
 from .flux_inferencer import FluxInferencer, random_or
@@ -57,6 +58,24 @@ class FluxEnsemble:
             diformer_kwargs = {}
         self.flux = FluxInferencer(self.mesh, diformer_kwargs=diformer_kwargs)
 
+    def prepare_stuff(self, texts, key=None, width=None, height=None, images=None,
+                      image_input_kwargs={}):
+        batch_size = len(texts)
+        clip_outputs = self.clip(texts)
+        t5_outputs = self.t5(texts)
+        text_input = self.flux.text_input(
+            clip_emb=clip_outputs, t5_emb=t5_outputs, t5_already_sharded=True, clip_already_sharded=True
+        )
+        if images is None:
+            prototype = Image.new("RGB", (width, height), (127, 127, 127))
+            images = [prototype] * batch_size
+        key = random_or(key)
+        image_input_kwargs = dict(
+            timesteps=1, guidance_scale=4.0, key=key
+        ) | image_input_kwargs
+        image_input = self.flux.image_input(images, **image_input_kwargs)
+        return text_input, image_input
+
     def sample(self, texts: List[str], width: int = 512, height: int = 512,
                sample_steps: int = 1, debug_mode=False, decode_latents=True,
                key=None):
@@ -66,19 +85,8 @@ class FluxEnsemble:
 
         logger.info("Sampling image for texts: {}", texts)
         batch_size = len(texts)
-        logger.info("Encoding text using CLIP")
-        clip_outputs = self.clip(texts)
-        logger.info("Encoding text using T5")
-        t5_outputs = self.t5(texts)
-        text_input = self.flux.text_input(
-            clip_emb=clip_outputs, t5_emb=t5_outputs, t5_already_sharded=True, clip_already_sharded=True
-        )
-        logger.info("Preparing image input")
-        prototype = Image.new("RGB", (width, height), (127, 127, 127))
-        key = random_or(key)
-        image_input = self.flux.image_input([prototype] * batch_size,
-                                            timesteps=1, guidance_scale=4.0,
-                                            key=key)
+        logger.info("Preparing inputs")
+        text_input, image_input = self.prepare_stuff(texts, width=width, height=height, key=key)
         logger.info("Sampling image")
         result = sample_jit(self.flux, text_input, image_input, schedule, debug_mode=debug_mode)
         # man, this would be cleaner as a monad
