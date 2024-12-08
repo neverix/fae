@@ -410,7 +410,6 @@ dependencies = [
     { name = "fh-plotly" },
     { name = "flax" },
     { name = "jax", extra = ["tpu"] },
-    { name = "jax-lorax" },
     { name = "jax-smi" },
     { name = "jaxonnxruntime" },
     { name = "libtpu-nightly" },
@@ -441,7 +440,6 @@ requires-dist = [
     { name = "fh-plotly", specifier = ">=0.1.1" },
     { name = "flax", specifier = ">=0.9.0" },
     { name = "jax", extras = ["tpu"], specifier = ">=0.4.34" },
-    { name = "jax-lorax", specifier = ">=0.3.1" },
     { name = "jax-smi", specifier = ">=1.0.4" },
     { name = "jaxonnxruntime", directory = "jort" },
     { name = "libtpu-nightly", url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" },
@@ -818,20 +816,6 @@ tpu = [
     { name = "jaxlib" },
     { name = "libtpu-nightly" },
     { name = "requests" },
-]
-
-[[package]]
-name = "jax-lorax"
-version = "0.3.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "jax" },
-    { name = "jaxlib" },
-    { name = "qax" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c4/f0/b65d28dfb9fb771531f8ef12ae6e49f5e8e31919915b8e374a5f1e1f3028/jax_lorax-0.3.1.tar.gz", hash = "sha256:80a535bbb4d843dd5033b97c43ad972e5cd95829f20dde52f3fc19e718b82919", size = 6575 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/99/02/6990f49a7a29d423c4a68531ff6c71f8f61ec78af43ce5785df85ffccf4b/jax_lorax-0.3.1-py3-none-any.whl", hash = "sha256:a55446c69fb12909ceda8f835f992d6e4ece3de864b698f507f5de2be97ae4f0", size = 7621 },
 ]
 
 [[package]]

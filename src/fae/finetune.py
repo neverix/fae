@@ -1,17 +1,17 @@
+from numpy import add
 import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from .vae import FluxVAE
 import jax.numpy as jnp
 from src.fae.ensemble import FluxEnsemble
-from src.fae.diformer import SequentialScan
-from .quant import QuantMatrix
+from src.fae.diflayers import VLinear
 from dataclasses import replace
 from loguru import logger
 import equinox as eqx
 from functools import partial
+from jaxtyping import Float, Array
 import wandb
-import lorax
 import os
 import qax
 import jax
@@ -34,59 +34,39 @@ data_loader = DataLoader(dataset, batch_size=4, shuffle=True, drop_last=True)
 # Load the Flux model
 ensemble = FluxEnsemble(use_schnell=False, use_fsdp=True)
 flux = ensemble.flux
-is_arr = lambda x: isinstance(x, qax.primitives.ArrayValue)
 
-def fix_lw(pytree):
-    def fixer(arr):
-        if isinstance(arr, (lorax.LoraWeight, QuantMatrix)):
-            arr = replace(arr, shape=arr.compute_shape())
-        return arr
-    return jax.tree.map(fixer, pytree, is_leaf=is_arr)
+def keygenerator():
+    key = jax.random.key(0)
+    while True:
+        key, val = jax.random.split(key)
+        yield val
+keygen = keygenerator()
 
-def init_flux(flux, rng):
-    flux = fix_lw(flux)
-    def create_spec(arr):
-        if len(arr.shape) == 1:
-            return lorax.LORA_FULL
-        else:
-            return 16
-    spec = jax.tree.map(
-        create_spec, flux,
-        is_leaf=is_arr)
-    return lorax.init_lora(flux, spec, rng, is_leaf=is_arr)
+class Lora(eqx.Module):
+    original: VLinear
+    a: Float[Array, "n k"]
+    b: Float[Array, "k m"]
+    alpha: float
 
-flux_params, flux_logic = flux.weights, flux.logic
+    def __init__(self, module: VLinear, rank=16, std=0.01, alpha=1., *, key):
+        self.original = module
+        self.a = jax.random.normal(key, (module.in_channels, rank)) * std
+        self.b = jnp.zeros((rank, module.out_channels))
+        self.alpha = alpha
 
-loop_params, flux_params = eqx.partition(
-    flux_params,
-    lambda x: isinstance(x, SequentialScan),
-    is_leaf=lambda x: isinstance(x, SequentialScan) or is_arr(x))
-single_params = eqx.tree_at(lambda x: x.double_blocks, loop_params, None)
-double_params = eqx.tree_at(lambda x: x.single_blocks, loop_params, None)
-single_params = fix_lw(jax.vmap(init_flux, in_axes=(0, None))(single_params, jax.random.key(0)))
-double_params = fix_lw(jax.vmap(init_flux, in_axes=(0, None))(double_params, jax.random.key(1)))
-flux_params = init_flux(flux_params, jax.random.key(2))
-flux_params = eqx.combine(flux_params, single_params, double_params, is_leaf=is_arr)
+    def __call__(self, x):
+        return self.original(x) + jnp.dot(jnp.dot(x, self.a), self.b) * self.alpha
 
+combined_flux = eqx.combine(flux.weights, flux.logic)
+def add_lora(l):
+    if not isinstance(l, VLinear):
+        return l
+    return Lora(l, keygen())
+combined_flux = jax.tree.map(add_lora, combined_flux, is_leaf=lambda x: isinstance(x, VLinear))
+weights, logic = eqx.partition(combined_flux, eqx.is_array)
+flux = eqx.tree_at(lambda x: x.weights, flux, weights)
+flux = eqx.tree_at(lambda x: x.logic, flux, logic)
 
-# # flux_params = jax.vmap(init_flux, in_axes=(0, None))(flux_params, jax.random.key(0))
-# def init_flux(path, arr, rng):
-#     if len(arr.shape) == 1:
-#         spec = lorax.LORA_FULL
-#     else:
-#         spec = 16
-#     init_lora = lorax.init_lora
-#     if path[0] in (jax.tree_util.GetAttrKey(name="single_blocks"), jax.tree_util.GetAttrKey(name="double_blocks")):
-#         init_lora = jax.vmap(init_lora, in_axes=(0, None, None))
-#     return init_lora(arr, spec, next(rng), is_leaf=is_arr), spec
-# def key_iter():
-#     i = 0
-#     while True:
-#         yield jax.random.key(i)
-# flux_params = jax.tree_util.tree_map_with_path(
-#     partial(init_flux, rng=key_iter()), flux_params,
-#     is_leaf=is_arr)
-flux = eqx.tree_at(lambda x: x.weights, flux, flux_params)
 ensemble.flux = flux
 
 run = wandb.init(project="fluxtune", entity="neverix")
