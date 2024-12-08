@@ -50,9 +50,9 @@ class SAEConfig:
     bias_dtype: jax.typing.DTypeLike = jnp.float32
     clip_data: Optional[float] = 16.0
 
-    k: int = 48
+    k: int = 32
     aux_k: int = 1024
-    aux_k_coeff: float = 1/32
+    aux_k_coeff: float = 1/8
     aux_k_variant: Literal["openai", "mine"] = "mine"
     death_threshold_multiplier: float = 0.5
     _death_threshold: Optional[float] = -jnp.inf  # 0.5

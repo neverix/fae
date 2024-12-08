@@ -5,7 +5,6 @@ from typing import List
 import jax.numpy as jnp
 import numpy as np
 from PIL import Image
-from transformers.models.imagegpt.modeling_imagegpt import IMAGEGPT_INPUTS_DOCSTRING
 from .clip import CLIPInterface
 from .t5 import T5EncoderInferencer
 from .flux_inferencer import FluxInferencer, random_or
