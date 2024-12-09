@@ -366,7 +366,8 @@ class SAETrainer(eqx.Module):
         logger.info("Creating optimizer")
         scheduler = optax.warmup_cosine_decay_schedule(
             init_value=0.0, peak_value=config.learning_rate,
-            warmup_steps=config.warmup_steps, decay_steps=config.n_steps)
+            warmup_steps=config.warmup_steps, decay_steps=config.n_steps,
+            end_value=0.0 if config.decay_lr else config.learning_rate)
         optimizer = optax.chain(
             optax.clip_by_global_norm(config.grad_clip_threshold),
             optax.adam(scheduler, b1=config.beta1, b2=config.beta2, eps=config.eps)

@@ -50,14 +50,16 @@ class SAEConfig:
     bias_dtype: jax.typing.DTypeLike = jnp.float32
     clip_data: Optional[float] = 16.0
 
-    k: int = 32
-    aux_k: int = 1024
-    aux_k_coeff: float = 1/8
+    k: int = 64
+    aux_k: int = 64
+    aux_k_coeff: float = 1/4
     aux_k_variant: Literal["openai", "mine"] = "mine"
     death_threshold_multiplier: float = 0.5
-    _death_threshold: Optional[float] = -jnp.inf  # 0.5
-    inv_min_density: int = 1024
-    _dead_after_tokens: Optional[int] = 524288
+    _death_threshold: Optional[float] = 3.0
+    # inv_min_density: int = 1024
+    inv_min_density: int = 64
+    # _dead_after_tokens: Optional[int] = 524288
+    _dead_after_tokens: Optional[int] = None
 
     @property
     def death_threshold(self):
@@ -85,12 +87,13 @@ class SAEConfig:
     batch_size: int = 4
     seq_len: int = 512 + 256
     seq_mode: Literal["both", "txt", "img"] = "both"
-    n_steps: int = 100_000
+    n_steps: int = 5_000
     wandb_name: Optional[tuple[str, str]] = ("neverix", "fae")
 
     tp_size: int = jax.local_device_count()
 
     learning_rate: float = 6e-4
+    decay_lr: bool = False
     beta1: float = 0.0
     beta2: float = 0.99
     eps: float = 1e-10

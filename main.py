@@ -58,9 +58,12 @@ def top_features():
     # metric = np.abs(frequencies - expected_frequency)
     # metric[maxima < 5] = np.inf
     # correct_order = np.argsort(metric)
-    correct_order = np.random.permutation(np.arange(len(scored_storage)))
+    # matches = np.arange(len(scored_storage))[maxima > 3.5]
+    matches = np.arange(len(scored_storage))[frequencies > 0.0002]
+    correct_order = np.random.permutation(matches)
     top_few = correct_order[:256].tolist()
     return Div(
+        H1(f"Top features ({len(matches) / len(scored_storage) * 100:.2f}% match criteria)"),
         *[Card(
             P(f"Feature {i}, Frequency: {frequencies[i]:.5f}, Max: {maxima[i]}"),
             A("View Max Acts", href=f"/maxacts/{i}")
