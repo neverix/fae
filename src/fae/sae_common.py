@@ -87,6 +87,7 @@ class SAEConfig:
     batch_size: int = 4
     seq_len: int = 512 + 256
     seq_mode: Literal["both", "txt", "img"] = "both"
+    site: tuple[Literal["double", "single"], int] = ("double", 18)
     n_steps: int = 5_000
     wandb_name: Optional[tuple[str, str]] = ("neverix", "fae")
 

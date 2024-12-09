@@ -11,7 +11,6 @@ from jaxtyping import Array, Float, UInt
 from typing import Optional
 from .quant import QuantMatrix
 from .quant_loading import load_thing, save_thing
-from oryx.core import sow
 import qax.primitives
 import qax
 import jax.numpy as jnp
@@ -21,7 +20,7 @@ from loguru import logger
 from typing import TypeVar, Generic
 from .diflayers import (
     SingleStreamBlock, DoubleStreamBlock, LastLayer, timestep_embedding, EmbedND, MLPEmbedder,
-    VLinear, DiFormerConfig, sow_debug, timestep_embedding)
+    VLinear, DiFormerConfig, timestep_embedding)
 from .dumb_rng import dumb_prng_impl
 
 
@@ -54,10 +53,11 @@ class SequentialScan(eqx.Module, Generic[T]):
 
     def __call__(self, x, *args, **kwargs):
         def scan_fn(carry, weight: T):
+            carry, i = carry
             layer = eqx.combine(weight, self.logic)
-            return layer(carry, *args, **kwargs), None
+            return (layer(carry, *args, **kwargs, layer_idx=i), i + 1), None
 
-        return jax.lax.scan(scan_fn, x, self.weights)[0]
+        return jax.lax.scan(scan_fn, (x, jnp.array(0, dtype=jnp.uint32)), self.weights)[0][0]
 
     def __getattr__(self, name):
         return getattr(self.weights, name)
@@ -79,7 +79,7 @@ def pad_and_mask(x, pad_to=128):
 class DiFormer(eqx.Module):
     """Diffusion transformer."""
     config_cls = DiFormerConfig
-    
+
     config: DiFormerConfig
     pe_embedder: EmbedND
     time_in: MLPEmbedder
@@ -101,7 +101,7 @@ class DiFormer(eqx.Module):
             key: Random key for initialization.
         """
         self.config = config
-        
+
         pe_dim = config.hidden_size // config.num_heads
         self.pe_embedder = EmbedND(
             dim=pe_dim, theta=config.theta, axes_dim=config.axes_dim
@@ -125,7 +125,7 @@ class DiFormer(eqx.Module):
 
         self.double_blocks = SequentialScan((DoubleStreamBlock(config, key=key),), repeat=config.depth)
         self.single_blocks = SequentialScan((SingleStreamBlock(config, key=key),), repeat=config.depth_single_blocks)
-    
+
         self.final_layer = LastLayer(config.hidden_size, 1, config.in_channels, key=key)
 
     def __call__(
@@ -152,54 +152,40 @@ class DiFormer(eqx.Module):
         """
         img = self.img_in(img)
         time_emb = timestep_embedding(timesteps, self.config.time_embed_dim)
-        sow_debug(dict(time_emb=time_emb, y=y), "pre_basic_vec")
         vec = self.time_in(time_emb)
-        sow_debug(dict(vec=vec), "basic_vec")
         if self.config.guidance_embed:
             if guidance is None:
                 raise ValueError("Didn't get guidance strength for guidance distilled model.")
             g_emb = timestep_embedding(guidance.astype(jnp.bfloat16), self.config.guidance_embed_dim)
-            sow_debug(dict(g_emb=g_emb, guidance=guidance), "guidance_emb")
             vec = vec + self.guidance_in(g_emb)
-        sow_debug(dict(vec=vec), "guidance_vec")
         vec = vec + self.vector_in(y)
-        sow_debug(dict(vec=vec), "vec")
         vec = vec.astype(jnp.bfloat16)
 
         txt = self.txt_in(txt)
-        
+
         orig_img_len = img.shape[-2]
         img, img_mask = pad_and_mask(img)
         txt, txt_mask = pad_and_mask(txt)
-        
+
         if txt_ids is None:
             txt_ids = jnp.zeros(txt.shape[:-1] + (3,), dtype=jnp.uint32)
         img_ids = pad_and_mask(img_ids)[0]
         ids = jnp.concatenate((txt_ids, img_ids), axis=-2)
         pe = self.pe_embedder(ids)
-        
+
         mask = jnp.concatenate((txt_mask, img_mask), -1)
         data = dict(img=img, txt=txt)
-        sow_debug(dict(img=img, txt=txt, vec=vec, pe=pe, mask=mask), "pre_double")
-        sow(img, tag="interp", name="img_proj")
-        sow(txt, tag="interp", name="txt_proj")
-        sow(vec, tag="interp", name="vec_proj")
-        sow(pe, tag="interp", name="pe")
-        sow(mask, tag="interp", name="mask")
-        
+
         data = self.double_blocks(data, vec=vec, pe=pe, mask=mask)
 
         txt, img = data["txt"], data["img"]
         data = jnp.concatenate((txt, img), -2)
-        sow_debug(dict(data=data), "pre_single")
-        
+
         data = self.single_blocks(data, vec=vec, pe=pe, mask=mask)
         img = data[..., txt.shape[-2]:, :]
 
-        sow_debug(dict(data=img), "pre_final")
         img = self.final_layer(img, vec)[..., :orig_img_len, :]
-        sow_debug(dict(img=img), "final_img")
-        
+
         return img
 
     @classmethod
@@ -233,7 +219,7 @@ def weight_slice(arr, *, axis: int, start: int, size: int):
 
 def preprocess_weights(flux, model):
     flux = {k.replace("model.diffusion_model.", ""): v for k, v in flux.items()}
-    
+
     logger.info("Layer-stacking arrays")
     flux_aggs = defaultdict(dict)
     new_flux = {}
@@ -408,7 +394,7 @@ def preprocess_official(flux, model):
     for key, values in nf4_flux.items():
         x = values[""]
         x = x.transpose(*range(0, x.ndim - 2), x.ndim - 1, x.ndim - 2)
-        
+
         if key == "single_blocks.linear1.weight":
             og_shape = (
                 model.config.depth_single_blocks,

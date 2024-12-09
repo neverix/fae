@@ -19,6 +19,7 @@ dependencies = [
     "libtpu-nightly",
     "loguru>=0.7.2",
     "matplotlib>=3.9.2",
+    "mishax",
     "more-itertools>=10.5.0",
     "numba>=0.60.0",
     "onnx>=1.17.0",
@@ -50,6 +51,7 @@ index-strategy = "first-index"
 libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241002+nightly-py3-none-any.whl" }
 jaxonnxruntime = { path = "jort" }
 oryx = { git = "https://github.com/jax-ml/oryx", rev = "339bc9215962dc998637d53ca8f19a3cea100ec0" }
+mishax = { git = "https://github.com/google-deepmind/mishax" }
 
 [tool.ruff.lint]
 ignore = ["F722"]

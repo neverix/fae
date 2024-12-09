@@ -5,7 +5,7 @@ from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec as P
 from datasets import load_dataset
 from more_itertools import chunked
-from pygments.formatters import TerminalTrueColorFormatter
+from . import diflayers
 from .ensemble import FluxEnsemble
 from dataclasses import dataclass, replace
 from functools import partial
@@ -29,6 +29,9 @@ from typing import Sequence
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from .sae_common import SAEConfig, SAEOutputSaver
+from mishax import ast_patcher
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 
 class SAEConfigHandler(ocp.type_handlers.TypeHandler):
@@ -521,6 +524,18 @@ class SAEOverseer:
         self.bar.last_print_n = int(self.sae_trainer.sae_logic.info.n_steps)
 
 
+double_block_handler = ContextVar("double_block_handler", default={})
+
+
+@contextmanager
+def set_contextvar(cv, value):
+    token = cv.set(value)
+    try:
+        yield
+    finally:
+        cv.reset(token)
+
+
 def main(train_mode=True, restore=False):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
@@ -532,6 +547,32 @@ def main(train_mode=True, restore=False):
         do_update=train_mode,
         seq_mode="img",
     )
+    # hygienic macros at home:
+    patcher = ast_patcher.ModuleASTPatcher(
+        diflayers,
+        **dict(
+            DoubleStreamBlock=[
+                "return dict(img=fr(img), txt=fr(txt))",
+                "from .sae_trainer import double_block_handler\n"
+                "print('???')\n"
+                "return jax.lax.switch(layer_idx, ["
+                    "(lambda a: print(i, a) or jax.experimental.io_callback(double_block_handler.get().get(i, lambda x: x), None, a) or a) "
+                    f"for i in range({ensemble.flux.logic.config.depth})"
+                    # f"[lambda: None] * {patched_layer} + "
+                    # "[lambda: jax.experimental.io_callback("
+                    #     "double_block_handler.get()"
+                    # ")] + "
+                    # f"[lambda: None] * {ensemble.flux.logic.config.depth - patched_layer - 1}"
+                "], dict(img=fr(img), txt=fr(txt)))\n"
+                # "jax.lax.switch(layer_idx, "
+                #     f"[lambda: None] * {patched_layer} + "
+                #     "[lambda: jax.experimental.io_callback("
+                #         "double_block_handler.get()"
+                #     ")] + "
+                #     f"[lambda: None] * {ensemble.flux.logic.config.depth - patched_layer - 1}"
+                # ")\n"
+            ]
+        ))
     if not train_mode and not restore:
         logger.warning("Enabling restore")
         restore = True
@@ -545,47 +586,50 @@ def main(train_mode=True, restore=False):
     width, height = config.width_and_height
     appeared_prompts = set()
     cycle_detected = False
-    for step, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
-        if len(prompts) < config.batch_size:
-            logger.warning("End of dataset")
-            continue
-        if not cycle_detected:
-            new_prompts = set(prompts)
-            if new_prompts & appeared_prompts:
-                cycle_detected = True
-                logger.warning("Cycle detected")
-            appeared_prompts |= new_prompts
-        key = jax.random.key(step)
-        logger.remove()
-        images, reaped = ensemble.sample(
-            prompts,
-            debug_mode=True,
-            decode_latents=False,
-            sample_steps=1,
-            key=key,
-            width=width,
-            height=height
-        )
-        assert isinstance(images, jnp.ndarray)  # to silence mypy
-        logger.add(sys.stderr, level="INFO")
-        training_data = jnp.concatenate((reaped["double_txt"][-1], reaped["double_img"][-1]), axis=-2)
-        training_data = config.cut_up(training_data)
-        for v in reaped.values():
-            v.delete()
-        sae_outputs = sae_trainer.step(training_data)
-        if not train_mode:
-            sae_weights, sae_indices = map(
-                config.uncut, map(
-                    np.asarray,
-                    jax.block_until_ready(
-                        jax.device_put(
-                            (sae_outputs.k_weights, sae_outputs.k_indices),
-                            jax.devices("cpu")[0]
+    reaped_ = {}
+    with patcher(), set_contextvar(double_block_handler, {18: partial(reaped_.__setitem__, "double_block")}):
+        for step, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
+            if len(prompts) < config.batch_size:
+                logger.warning("End of dataset")
+                continue
+            if not cycle_detected:
+                new_prompts = set(prompts)
+                if new_prompts & appeared_prompts:
+                    cycle_detected = True
+                    logger.warning("Cycle detected")
+                appeared_prompts |= new_prompts
+            key = jax.random.key(step)
+            logger.remove()
+            images, reaped = ensemble.sample(
+                prompts,
+                debug_mode=True,
+                decode_latents=False,
+                sample_steps=1,
+                key=key,
+                width=width,
+                height=height
+            )
+            print(reaped_)
+            assert isinstance(images, jnp.ndarray)  # to silence mypy
+            logger.add(sys.stderr, level="INFO")
+            training_data = jnp.concatenate((reaped["double_txt"][-1], reaped["double_img"][-1]), axis=-2)
+            training_data = config.cut_up(training_data)
+            for v in reaped.values():
+                v.delete()
+            sae_outputs = sae_trainer.step(training_data)
+            if not train_mode:
+                sae_weights, sae_indices = map(
+                    config.uncut, map(
+                        np.asarray,
+                        jax.block_until_ready(
+                            jax.device_put(
+                                (sae_outputs.k_weights, sae_outputs.k_indices),
+                                jax.devices("cpu")[0]
+                            )
                         )
                     )
                 )
-            )
-            saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
+                saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
 
     print("Waiting for saver to leave...")
 
