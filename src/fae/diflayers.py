@@ -12,6 +12,8 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Bool, Float
 import equinox as eqx
 from equinox import nn
+from functools import partial
+from . import interp_globals
 
 
 @dataclass(frozen=True)
@@ -523,15 +525,20 @@ class DoubleStreamBlock(eqx.Module):
         sow(img, tag="interp", name="double_img", mode="append")
         sow(txt, tag="interp", name="double_txt", mode="append")
 
-        from .sae_trainer import double_block_handler
         result = dict(img=fr(img), txt=fr(txt))
+        def cbfn(i, a):
+            print("AAAAAAAA", interp_globals.interp_handlers)
+            getattr(interp_globals.interp_handlers, "double_block_handler", {}).get(i, lambda x: print(i, interp_globals.interp_handlers))(a)
+            return a
+
         jax.lax.switch(layer_idx, [
             (lambda a:
                 # jax.experimental.io_callback(double_block_handler.get().get(i, lambda x: None), None, a)
                 # or a)
                 jax.experimental.io_callback(
+                    partial(cbfn, i), a, a))
                     # lambda a: double_block_handler.get().get(i, lambda x: print(x))(a) or a, a, a))
-                    lambda a: (lambda x: print(double_block_handler.get()))(a) or a, a, a))
+                    # lambda a: (lambda x: print(double_block_handler.get()))(a) or a, a, a))
                     # lambda a: (lambda x: print(x))(a) or a, a, a))
             for i in range(self.config.depth)
         ], result)

@@ -28,8 +28,8 @@ from typing import Sequence
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from .sae_common import SAEConfig, SAEOutputSaver
-from contextlib import contextmanager
-from contextvars import ContextVar
+from .interp_globals import set_contextvar
+import threading
 
 
 class SAEConfigHandler(ocp.type_handlers.TypeHandler):
@@ -522,18 +522,6 @@ class SAEOverseer:
         self.bar.last_print_n = int(self.sae_trainer.sae_logic.info.n_steps)
 
 
-double_block_handler = ContextVar("double_block_handler", default={})
-
-
-@contextmanager
-def set_contextvar(cv, value):
-    token = cv.set(value)
-    try:
-        yield
-    finally:
-        cv.reset(token)
-
-
 def main(train_mode=True, restore=False):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
@@ -562,7 +550,7 @@ def main(train_mode=True, restore=False):
     def setter(x):
         print("CALLBACK")
         reaped_["double_block"] = x
-    with set_contextvar(double_block_handler, {18: setter}):
+    with set_contextvar("double_block_handler", {18: setter}):
         for step, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
             if len(prompts) < config.batch_size:
                 logger.warning("End of dataset")
