@@ -52,12 +52,13 @@ class SAEConfig:
 
     k: int = 64
     aux_k: int = 64
-    aux_k_coeff: float = 1/4
+    aux_k_coeff: float = 1/32
     aux_k_variant: Literal["openai", "mine"] = "mine"
     death_threshold_multiplier: float = 0.5
-    _death_threshold: Optional[float] = 3.0
-    # inv_min_density: int = 1024
-    inv_min_density: int = 64
+    _death_threshold: Optional[float] = 1.0
+    inv_min_density: int = 1024
+    # inv_min_density: int = 64
+    # inv_min_density: int = 128
     # _dead_after_tokens: Optional[int] = 524288
     _dead_after_tokens: Optional[int] = None
 
@@ -88,7 +89,8 @@ class SAEConfig:
     seq_len: int = 512 + 256
     seq_mode: Literal["both", "txt", "img"] = "both"
     site: tuple[Literal["double", "single"], int] = ("double", 18)
-    n_steps: int = 5_000
+    # n_steps: int = 5_000
+    n_steps: int = 20_000
     wandb_name: Optional[tuple[str, str]] = ("neverix", "fae")
 
     tp_size: int = jax.local_device_count()

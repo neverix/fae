@@ -5,7 +5,6 @@ from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec as P
 from datasets import load_dataset
 from more_itertools import chunked
-from . import diflayers
 from .ensemble import FluxEnsemble
 from dataclasses import dataclass, replace
 from functools import partial
@@ -29,7 +28,6 @@ from typing import Sequence
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from .sae_common import SAEConfig, SAEOutputSaver
-from mishax import ast_patcher
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -547,32 +545,6 @@ def main(train_mode=True, restore=False):
         do_update=train_mode,
         seq_mode="img",
     )
-    # hygienic macros at home:
-    patcher = ast_patcher.ModuleASTPatcher(
-        diflayers,
-        **dict(
-            DoubleStreamBlock=[
-                "return dict(img=fr(img), txt=fr(txt))",
-                "from .sae_trainer import double_block_handler\n"
-                "print('???')\n"
-                "return jax.lax.switch(layer_idx, ["
-                    "(lambda a: print(i, a) or jax.experimental.io_callback(double_block_handler.get().get(i, lambda x: x), None, a) or a) "
-                    f"for i in range({ensemble.flux.logic.config.depth})"
-                    # f"[lambda: None] * {patched_layer} + "
-                    # "[lambda: jax.experimental.io_callback("
-                    #     "double_block_handler.get()"
-                    # ")] + "
-                    # f"[lambda: None] * {ensemble.flux.logic.config.depth - patched_layer - 1}"
-                "], dict(img=fr(img), txt=fr(txt)))\n"
-                # "jax.lax.switch(layer_idx, "
-                #     f"[lambda: None] * {patched_layer} + "
-                #     "[lambda: jax.experimental.io_callback("
-                #         "double_block_handler.get()"
-                #     ")] + "
-                #     f"[lambda: None] * {ensemble.flux.logic.config.depth - patched_layer - 1}"
-                # ")\n"
-            ]
-        ))
     if not train_mode and not restore:
         logger.warning("Enabling restore")
         restore = True
@@ -587,7 +559,10 @@ def main(train_mode=True, restore=False):
     appeared_prompts = set()
     cycle_detected = False
     reaped_ = {}
-    with patcher(), set_contextvar(double_block_handler, {18: partial(reaped_.__setitem__, "double_block")}):
+    def setter(x):
+        print("CALLBACK")
+        reaped_["double_block"] = x
+    with set_contextvar(double_block_handler, {18: setter}):
         for step, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
             if len(prompts) < config.batch_size:
                 logger.warning("End of dataset")

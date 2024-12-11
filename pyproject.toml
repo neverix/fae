@@ -19,7 +19,6 @@ dependencies = [
     "libtpu-nightly",
     "loguru>=0.7.2",
     "matplotlib>=3.9.2",
-    "mishax",
     "more-itertools>=10.5.0",
     "numba>=0.60.0",
     "onnx>=1.17.0",

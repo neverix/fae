@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from oryx.core import sow
 from einops import rearrange
 from jax.experimental.pallas.ops.tpu import flash_attention
+import jax.experimental
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Bool, Float
 import equinox as eqx
@@ -455,6 +456,7 @@ def fr(x):
 class DoubleStreamBlock(eqx.Module):
     """Main two-stream MMDiT block."""
 
+    config: DiFormerConfig
     img_mod: Modulation
     img_norm1: VLayerNorm
     img_attn: SelfAttention
@@ -467,6 +469,7 @@ class DoubleStreamBlock(eqx.Module):
     txt_mlp: MLP
 
     def __init__(self, config: DiFormerConfig, *, key: jax.random.PRNGKey):
+        self.config = config
         self.img_norm1, self.img_norm2, self.txt_norm1, self.txt_norm2 = (
             VLayerNorm(config.hidden_size, use_weight=False, use_bias=False, eps=1e-6)
             for _ in range(4)
@@ -520,7 +523,28 @@ class DoubleStreamBlock(eqx.Module):
         sow(img, tag="interp", name="double_img", mode="append")
         sow(txt, tag="interp", name="double_txt", mode="append")
 
-        return dict(img=fr(img), txt=fr(txt))
+        from .sae_trainer import double_block_handler
+        result = dict(img=fr(img), txt=fr(txt))
+        jax.lax.switch(layer_idx, [
+            (lambda a:
+                # jax.experimental.io_callback(double_block_handler.get().get(i, lambda x: None), None, a)
+                # or a)
+                jax.experimental.io_callback(
+                    # lambda a: double_block_handler.get().get(i, lambda x: print(x))(a) or a, a, a))
+                    lambda a: (lambda x: print(double_block_handler.get()))(a) or a, a, a))
+                    # lambda a: (lambda x: print(x))(a) or a, a, a))
+            for i in range(self.config.depth)
+        ], result)
+        return result
+        # result = dict(img=fr(img), txt=fr(txt))
+        # jax.lax.switch(layer_idx, [
+        #     (lambda a:
+        #         jax.experimental.io_callback(
+        #             lambda a: double_block_handler.get().get(i, lambda x: None)(a),
+        #             None, a))
+        #     for i in range(self.config.depth)
+        # ], dict(img=fr(img), txt=fr(txt)))
+        # return result
 
 
 class SingleStreamBlock(eqx.Module):
