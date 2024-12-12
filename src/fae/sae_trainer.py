@@ -28,7 +28,7 @@ from typing import Sequence
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from .sae_common import SAEConfig, SAEOutputSaver
-from .interp_globals import set_contextvar
+from .interp_globals import post_double_stream
 import threading
 
 
@@ -522,7 +522,7 @@ class SAEOverseer:
         self.bar.last_print_n = int(self.sae_trainer.sae_logic.info.n_steps)
 
 
-def main(train_mode=True, restore=False):
+def main(train_mode: bool = True, restore: bool = False):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
     prompts_iterator = prompts_dataset["train"]["caption_llava_short"]
@@ -546,23 +546,19 @@ def main(train_mode=True, restore=False):
     width, height = config.width_and_height
     appeared_prompts = set()
     cycle_detected = False
-    reaped_ = {}
-    def setter(x):
-        print("CALLBACK")
-        reaped_["double_block"] = x
-    with set_contextvar("double_block_handler", {18: setter}):
-        for step, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
-            if len(prompts) < config.batch_size:
-                logger.warning("End of dataset")
-                continue
-            if not cycle_detected:
-                new_prompts = set(prompts)
-                if new_prompts & appeared_prompts:
-                    cycle_detected = True
-                    logger.warning("Cycle detected")
-                appeared_prompts |= new_prompts
-            key = jax.random.key(step)
-            logger.remove()
+    for step, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
+        if len(prompts) < config.batch_size:
+            logger.warning("End of dataset")
+            continue
+        if not cycle_detected:
+            new_prompts = set(prompts)
+            if new_prompts & appeared_prompts:
+                cycle_detected = True
+                logger.warning("Cycle detected")
+            appeared_prompts |= new_prompts
+        key = jax.random.key(step)
+        logger.remove()
+        with post_double_stream.capture(18) as reaped_:
             images, reaped = ensemble.sample(
                 prompts,
                 debug_mode=True,
@@ -572,27 +568,27 @@ def main(train_mode=True, restore=False):
                 width=width,
                 height=height
             )
-            print(reaped_)
-            assert isinstance(images, jnp.ndarray)  # to silence mypy
-            logger.add(sys.stderr, level="INFO")
-            training_data = jnp.concatenate((reaped["double_txt"][-1], reaped["double_img"][-1]), axis=-2)
-            training_data = config.cut_up(training_data)
-            for v in reaped.values():
-                v.delete()
-            sae_outputs = sae_trainer.step(training_data)
-            if not train_mode:
-                sae_weights, sae_indices = map(
-                    config.uncut, map(
-                        np.asarray,
-                        jax.block_until_ready(
-                            jax.device_put(
-                                (sae_outputs.k_weights, sae_outputs.k_indices),
-                                jax.devices("cpu")[0]
-                            )
+        print({k: {a: b.shape for a, b in v.items()} for k, v in reaped_.items()})
+        assert isinstance(images, jnp.ndarray)  # to silence mypy
+        logger.add(sys.stderr, level="INFO")
+        training_data = jnp.concatenate((reaped["double_txt"][-1], reaped["double_img"][-1]), axis=-2)
+        training_data = config.cut_up(training_data)
+        for v in reaped.values():
+            v.delete()
+        sae_outputs = sae_trainer.step(training_data)
+        if not train_mode:
+            sae_weights, sae_indices = map(
+                config.uncut, map(
+                    np.asarray,
+                    jax.block_until_ready(
+                        jax.device_put(
+                            (sae_outputs.k_weights, sae_outputs.k_indices),
+                            jax.devices("cpu")[0]
                         )
                     )
                 )
-                saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
+            )
+            saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
 
     print("Waiting for saver to leave...")
 

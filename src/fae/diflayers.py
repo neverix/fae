@@ -13,7 +13,7 @@ from jaxtyping import Array, Bool, Float
 import equinox as eqx
 from equinox import nn
 from functools import partial
-from . import interp_globals
+from .interp_globals import post_double_stream
 
 
 @dataclass(frozen=True)
@@ -526,32 +526,8 @@ class DoubleStreamBlock(eqx.Module):
         sow(txt, tag="interp", name="double_txt", mode="append")
 
         result = dict(img=fr(img), txt=fr(txt))
-        def cbfn(i, a):
-            print("AAAAAAAA", interp_globals.interp_handlers)
-            getattr(interp_globals.interp_handlers, "double_block_handler", {}).get(i, lambda x: print(i, interp_globals.interp_handlers))(a)
-            return a
-
-        jax.lax.switch(layer_idx, [
-            (lambda a:
-                # jax.experimental.io_callback(double_block_handler.get().get(i, lambda x: None), None, a)
-                # or a)
-                jax.experimental.io_callback(
-                    partial(cbfn, i), a, a))
-                    # lambda a: double_block_handler.get().get(i, lambda x: print(x))(a) or a, a, a))
-                    # lambda a: (lambda x: print(double_block_handler.get()))(a) or a, a, a))
-                    # lambda a: (lambda x: print(x))(a) or a, a, a))
-            for i in range(self.config.depth)
-        ], result)
+        post_double_stream.jax_callback(layer_idx, result, self.config.depth)
         return result
-        # result = dict(img=fr(img), txt=fr(txt))
-        # jax.lax.switch(layer_idx, [
-        #     (lambda a:
-        #         jax.experimental.io_callback(
-        #             lambda a: double_block_handler.get().get(i, lambda x: None)(a),
-        #             None, a))
-        #     for i in range(self.config.depth)
-        # ], dict(img=fr(img), txt=fr(txt)))
-        # return result
 
 
 class SingleStreamBlock(eqx.Module):

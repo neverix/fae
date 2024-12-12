@@ -1,15 +1,40 @@
+# ...
+# this is not a place of honor
 from contextlib import contextmanager
-from types import SimpleNamespace
+from contextvars import ContextVar
+from functools import partial
+import jax.experimental
+import jax
 
-# interp_handlers = threading.local()
-interp_handlers = SimpleNamespace()
+
+class InterpHelper(object):
+    def __init__(self, name):
+        self._cvar = ContextVar(name, default={})
+
+    @contextmanager
+    def _set_contextvar(self, value):
+        token = self._cvar.set(self._cvar.get() | value)
+        try:
+            yield
+        finally:
+            self._cvar.reset(token)
+
+    @contextmanager
+    def capture(self, *layers):
+        result = {}
+        with self._set_contextvar({
+            layer: partial(result.__setitem__, layer)
+            for layer in layers
+        }):
+            yield result
+
+    def jax_callback(self, layer_idx, value, depth):
+        jax.lax.switch(layer_idx, [
+            (lambda a:
+                jax.experimental.io_callback(
+                    self._cvar.get().get(i, lambda x: None), None, a))
+            for i in range(depth)
+        ], value)
 
 
-@contextmanager
-def set_contextvar(key, value):
-    old_val = getattr(interp_handlers, key, None)
-    setattr(interp_handlers, key, value)
-    try:
-        yield
-    finally:
-        setattr(interp_handlers, key, old_val)
+post_double_stream = InterpHelper('post_double_stream')
