@@ -577,7 +577,7 @@ def main(train_mode: bool = True, restore: bool = False):
         logger.add(sys.stderr, level="INFO")
         training_data = jnp.concatenate((reaped[18]["txt"], reaped[18]["img"]), axis=-2)[0]
         training_data = config.cut_up(training_data)
-        if step % 100 == 0:
+        if step < 1000:
             np.save(f"somewhere/td/{step}.npy", training_data.astype(np.float32))
         sae_outputs = sae_trainer.step(
             jax.device_put(

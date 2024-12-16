@@ -1,11 +1,13 @@
 #%%
+from glob import glob
 import numpy as np
 from ml_dtypes import bfloat16
 import matplotlib.pyplot as plt
 
-data = np.load("somewhere/td.npy")
-data = data.view(bfloat16)
-data = data.astype(np.float32)
+datas = []
+for i in glob("somewhere/td/*.npy"):
+    datas.append(np.load(i))
+data = np.concatenate(datas)
 data.shape
 #%%
 # norm histogram
@@ -25,8 +27,18 @@ plt.scatter(data_pca[:, 0], data_pca[:, 1])
 # Variance explained by PCA
 pca = PCA()
 pca.fit(data)
-plt.plot(pca.explained_variance_ratio_)
-plt.loglog()
 #%%
+plt.plot(pca.explained_variance_ratio_)
+plt.xscale("log")
+plt.yscale("log")
 # data is very low-rank!
-# for comparison, let's look at 
+# %%
+# for comparison, let's look at data from an LM
+llama_data = np.load("somewhere/llama.npz")["arr_0"]
+pca = PCA()
+pca.fit(llama_data)
+#%%
+plt.plot(pca.explained_variance_ratio_[1:])
+plt.xscale("log")
+# plt.yscale("log")
+# %%
