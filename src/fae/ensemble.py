@@ -76,7 +76,7 @@ class FluxEnsemble:
         return text_input, image_input
 
     def sample(self, texts: List[str], width: int = 512, height: int = 512,
-               sample_steps: int = 1, debug_mode=False, decode_latents=True,
+               sample_steps: int = 1, decode_latents=True,
                key=None):
         n_tokens = width * height / (16 * 16)
         schedule = get_flux_schedule(n_tokens, sample_steps,
@@ -87,12 +87,7 @@ class FluxEnsemble:
         logger.info("Preparing inputs")
         text_input, image_input = self.prepare_stuff(texts, width=width, height=height, key=key)
         logger.info("Sampling image")
-        result = sample_jit(self.flux, text_input, image_input, schedule, debug_mode=debug_mode)
-        # man, this would be cleaner as a monad
-        if debug_mode:
-            denoised, reaped = result
-        else:
-            denoised = result
+        denoised = sample_jit(self.flux, text_input, image_input, schedule)
         assert isinstance(denoised, jnp.ndarray)
         logger.info("Decoding")
         vae = self.flux.vae
@@ -102,27 +97,19 @@ class FluxEnsemble:
             images = [vae.deprocess(decoded[i:i+1]) for i in range(denoised.shape[0])]
         else:
             images = jax.device_put(denoised, jax.devices("cpu")[0])
-        if debug_mode:
-            return images, reaped
-        else:
-            return images
+        return images
 
 
 @eqx.filter_jit
-def sample_jit(flux, text_input, image_input, schedule, debug_mode=False):
+def sample_jit(flux, text_input, image_input, schedule):
     schedule = schedule[:-1], schedule[1:]
     def sample_step(image_input, timesteps):
         more_noisy, less_noisy = timesteps
-        flux_result = flux(text_input, image_input, debug_mode=debug_mode)
-        if debug_mode:
-            for k, v in flux_result.reaped.items():
-                sow(v, name=k, tag="reaped", mode="clobber")
+        flux_result = flux(text_input, image_input)
         return flux_result.next_input(more_noisy - less_noisy), None
     def generate(image_input):
         return jax.lax.scan(sample_step, image_input, schedule)[0].encoded
-    result, reaped = call_and_reap(generate, tag="reaped")(image_input)
-    if debug_mode:
-        return result, reaped
+    result = generate(image_input)
     return result
 
 

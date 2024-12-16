@@ -335,6 +335,7 @@ def hist(x):
     return wandb.Histogram(np.asarray(x.flatten().astype(jnp.float32).tolist()))
 
 class SAETrainer(eqx.Module):
+    mesh: jax.sharding.Mesh
     config: SAEConfig
     sae_params: SAE
     sae_logic: SAE
@@ -379,6 +380,7 @@ class SAETrainer(eqx.Module):
         ema = jax.tree.map(jnp.copy, sae_params)
 
         return cls(
+            mesh=mesh,
             config=config,
             sae_params=sae_params,
             sae_logic=sae_logic,
@@ -521,6 +523,10 @@ class SAEOverseer:
         self.bar.n = int(self.sae_trainer.sae_logic.info.n_steps)
         self.bar.last_print_n = int(self.sae_trainer.sae_logic.info.n_steps)
 
+    @property
+    def mesh(self):
+        return self.sae_trainer.mesh
+
 
 def main(train_mode: bool = True, restore: bool = False):
     logger.info("Loading dataset")
@@ -558,24 +564,25 @@ def main(train_mode: bool = True, restore: bool = False):
             appeared_prompts |= new_prompts
         key = jax.random.key(step)
         logger.remove()
-        with post_double_stream.capture(18) as reaped_:
-            images, reaped = ensemble.sample(
+        with post_double_stream.capture(18) as reaped:
+            images = ensemble.sample(
                 prompts,
-                debug_mode=True,
                 decode_latents=False,
                 sample_steps=1,
                 key=key,
                 width=width,
                 height=height
             )
-        print({k: {a: b.shape for a, b in v.items()} for k, v in reaped_.items()})
         assert isinstance(images, jnp.ndarray)  # to silence mypy
         logger.add(sys.stderr, level="INFO")
-        training_data = jnp.concatenate((reaped["double_txt"][-1], reaped["double_img"][-1]), axis=-2)
+        training_data = jnp.concatenate((reaped[18]["txt"], reaped[18]["img"]), axis=-2)[0]
         training_data = config.cut_up(training_data)
-        for v in reaped.values():
-            v.delete()
-        sae_outputs = sae_trainer.step(training_data)
+        if step % 100 == 0:
+            np.save(f"somewhere/td/{step}.npy", training_data.astype(np.float32))
+        sae_outputs = sae_trainer.step(
+            jax.device_put(
+                training_data,
+                jax.sharding.NamedSharding(sae_trainer.mesh, jax.sharding.PartitionSpec("dp", None))))
         if not train_mode:
             sae_weights, sae_indices = map(
                 config.uncut, map(

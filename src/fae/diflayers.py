@@ -526,7 +526,7 @@ class DoubleStreamBlock(eqx.Module):
         sow(txt, tag="interp", name="double_txt", mode="append")
 
         result = dict(img=fr(img), txt=fr(txt))
-        post_double_stream.jax_callback(layer_idx, result, self.config.depth)
+        post_double_stream.jax_callback(layer_idx, result)
         return result
 
 

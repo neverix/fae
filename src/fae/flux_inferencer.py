@@ -14,7 +14,6 @@ from .diformer import DiFormer, is_arr
 import equinox as eqx
 from .diflayers import global_mesh
 import qax
-from oryx.core.interpreters.harvest import call_and_reap
 from typing import Optional
 from jax.experimental import mesh_utils
 import ml_dtypes
@@ -94,7 +93,6 @@ class ImageInput(DotDict):
 class ImageOutput(DotDict):
     previous_input: ImageInput
     patched: Float[Array, "*batch n_seq (patch_size patch_size in_channels)"]
-    reaped: Optional[dict]
 
     @property
     def prediction(self):
@@ -138,34 +136,13 @@ class ImageOutput(DotDict):
         return jnp.mean(jnp.square(self.ground_truth - self.prediction))  # simple as that
 
 
-@partial(jax.jit, static_argnums=(1,), static_argnames=("debug_mode", "debug_interp"))
-@qax.use_implicit_args
-def run_model_(weights, logic, kwargs, debug_mode=False, debug_interp=True):
-    def caller(kwargs):
-        model = eqx.combine(weights, logic)
-        return model(**kwargs)
-    if debug_interp:
-        results, aux = call_and_reap(caller, tag="interp")(kwargs)
-    else:
-        results, aux = call_and_reap(caller, tag="debug")(kwargs)
-    if debug_mode:
-        return results, aux
-    return results
-
-    (results, debug_results), interp_results = results
-    if debug_mode:
-        if debug_interp:
-            return results, interp_results
-        else:
-            return results, debug_results
-    return results
+call = eqx.filter_jit(qax.use_implicit_args(lambda arg, **kwargs: arg(**kwargs)))
 
 
 class FluxInferencer(eqx.Module):
     mesh: jax.sharding.Mesh = eqx.field(static=True)
     vae: FluxVAE
-    logic: DiFormer
-    weights: DiFormer
+    model: DiFormer
 
     def __init__(
         self,
@@ -193,7 +170,6 @@ class FluxInferencer(eqx.Module):
         mesh_and_axis = (mesh, None)  # FSDP
 
         logger.info("Moving model to device")
-        weights, logic = eqx.partition(model, eqx.is_array)
 
         def to_mesh(arr):
             if not is_arr(arr):
@@ -207,10 +183,9 @@ class FluxInferencer(eqx.Module):
                 ),
             )
 
-        weights = jax.tree.map(to_mesh, weights, is_leaf=is_arr)
-        self.weights, self.logic = weights, logic
+        self.model = jax.tree.map(to_mesh, model, is_leaf=is_arr)
 
-    def __call__(self, text_inputs, image_inputs, debug_mode=False, debug_interp=True):
+    def __call__(self, text_inputs, image_inputs):
         img, timesteps, img_ids, guidance_scale, h, w = [
             image_inputs[k]
             for k in ("patched", "timesteps", "img_ids", "guidance_scale", "h", "w")
@@ -224,14 +199,8 @@ class FluxInferencer(eqx.Module):
             img_ids=img_ids,
             guidance=guidance_scale,
         )
-        results = run_model_(self.weights, self.logic, kwargs,
-                             debug_mode=debug_mode, debug_interp=debug_interp)
-        reaped = None
-        if debug_mode:
-            patched, reaped = results
-        else:
-            patched = results
-        return ImageOutput(previous_input=image_inputs, patched=patched, reaped=reaped)
+        patched = call(self.model, **kwargs)
+        return ImageOutput(previous_input=image_inputs, patched=patched)
 
     def to_mesh(self, x, already_sharded=False):
         def to_mesh_fn(x):
@@ -343,29 +312,6 @@ def main():
     result = jax.block_until_ready(inferencer(text_inputs, image_inputs))
     logger.info("Running model")
     result = jax.block_until_ready(inferencer(text_inputs, image_inputs))
-    if False:
-        logger.info("Running model for debug")
-        result = jax.block_until_ready(inferencer(text_inputs, image_inputs, debug_mode=True))
-
-        logger.info("Comparing results")
-        pred_noise = result.noise[0, :1]
-        noise = image_inputs.noise[0, :1]
-        print(
-            jnp.mean(jnp.square(noise)),
-            jnp.mean(jnp.square(pred_noise)),
-            jnp.mean(jnp.square(noise - pred_noise)),
-        )
-        print(jnp.mean(jnp.square(result.prediction - result.ground_truth)))
-        print(
-            jnp.mean(
-                jnp.square(
-                    # jax.random.normal(jax.random.key(0), result.prediction.shape)
-                    (-image_inputs.encoded)
-                    - result.ground_truth
-                )
-            )
-        )
-        print({k: v.shape for k, v in result.reaped.items()})
 
     logger.info("Saving results")
     vae = inferencer.vae

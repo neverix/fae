@@ -44,23 +44,22 @@ def unify(arg, *args, repeat=None):
 T = TypeVar('T', bound=eqx.Module)
 
 class SequentialScan(eqx.Module, Generic[T]):
-    logic: T
-    weights: T
+    layer: T
 
     def __init__(self, layers: tuple[T, ...], repeat: int = None):
-        unified = jax.tree.map(partial(unify, repeat=repeat), *layers, is_leaf=is_arr)
-        self.weights, self.logic = eqx.partition(unified, is_arr)
+        self.layer = jax.tree.map(partial(unify, repeat=repeat), *layers, is_leaf=is_arr)
 
     def __call__(self, x, *args, **kwargs):
+        weights, logic = eqx.partition(self.layer, is_arr)
         def scan_fn(carry, weight: T):
             carry, i = carry
-            layer = eqx.combine(weight, self.logic)
+            layer = eqx.combine(weight, logic)
             return (layer(carry, *args, **kwargs, layer_idx=i), i + 1), None
 
-        return jax.lax.scan(scan_fn, (x, jnp.array(0, dtype=jnp.uint32)), self.weights)[0][0]
+        return jax.lax.scan(scan_fn, (x, jnp.array(0, dtype=jnp.uint32)), weights)[0][0]
 
     def __getattr__(self, name):
-        return getattr(self.weights, name)
+        return getattr(self.layer, name)
 
 
 def pad_and_mask(x, pad_to=128):

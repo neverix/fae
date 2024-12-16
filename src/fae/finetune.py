@@ -50,22 +50,21 @@ class Lora(eqx.Module):
 
     def __init__(self, module: VLinear, rank=16, std=0.01, alpha=1., *, key):
         self.original = module
-        self.a = jax.random.normal(key, (module.in_channels, rank)) * std
-        self.b = jnp.zeros((rank, module.out_channels))
+        batch_shapes = module.weight.shape[:-2]
+        self.a = jax.random.normal(key, batch_shapes + (module.in_channels, rank)) * std
+        self.b = jnp.zeros(batch_shapes + (rank, module.out_channels))
         self.alpha = alpha
 
     def __call__(self, x):
         return self.original(x) + jnp.dot(jnp.dot(x, self.a), self.b) * self.alpha
 
-combined_flux = eqx.combine(flux.weights, flux.logic)
 def add_lora(l):
     if not isinstance(l, VLinear):
         return l
-    return Lora(l, keygen())
-combined_flux = jax.tree.map(add_lora, combined_flux, is_leaf=lambda x: isinstance(x, VLinear))
-weights, logic = eqx.partition(combined_flux, eqx.is_array)
-flux = eqx.tree_at(lambda x: x.weights, flux, weights)
-flux = eqx.tree_at(lambda x: x.logic, flux, logic)
+    return Lora(l, key=next(keygen))
+
+flux = eqx.tree_at(lambda x: x.model, flux,
+    replace_fn=lambda m: jax.tree.map(add_lora, m, is_leaf=lambda x: isinstance(x, VLinear)))
 
 ensemble.flux = flux
 

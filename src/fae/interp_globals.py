@@ -1,40 +1,37 @@
 # ...
 # this is not a place of honor
 from contextlib import contextmanager
-from contextvars import ContextVar
 from functools import partial
 import jax.experimental
+from copy import copy
 import jax
 
 
 class InterpHelper(object):
     def __init__(self, name):
-        self._cvar = ContextVar(name, default={})
+        self._cvar = {}
 
     @contextmanager
     def _set_contextvar(self, value):
-        token = self._cvar.set(self._cvar.get() | value)
+        old = copy(self._cvar)
+        self._cvar = old | value
         try:
             yield
         finally:
-            self._cvar.reset(token)
+            self._cvar = old
 
     @contextmanager
     def capture(self, *layers):
         result = {}
         with self._set_contextvar({
-            layer: partial(result.__setitem__, layer)
+            layer: (lambda x: partial(result.__setitem__, layer)(x))
             for layer in layers
         }):
             yield result
 
-    def jax_callback(self, layer_idx, value, depth):
-        jax.lax.switch(layer_idx, [
-            (lambda a:
-                jax.experimental.io_callback(
-                    self._cvar.get().get(i, lambda x: None), None, a))
-            for i in range(depth)
-        ], value)
+    def jax_callback(self, layer_idx, value):
+        jax.experimental.io_callback(
+            lambda i, a: self._cvar.get(int(i), lambda x: None)(a), None, layer_idx, value)
 
 
 post_double_stream = InterpHelper('post_double_stream')
