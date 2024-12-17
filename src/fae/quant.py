@@ -13,10 +13,19 @@ from functools import partial
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import PartitionSpec as P
+from contextlib import contextmanager
 import qax
 
 
 USE_KERNEL = False
+
+@contextmanager
+def kernel_mode(value: bool):
+    global USE_KERNEL
+    old = USE_KERNEL
+    USE_KERNEL = value
+    yield
+    USE_KERNEL = old
 
 BIG_POLYNOMIAL = False
 def nf4xf32_to_f32(x):
@@ -554,13 +563,27 @@ def dot_general_handler(
 
     orig_a_shape = a.shape
     if USE_KERNEL:
-        mf = matmul_fast
+        mf = partial(matmul_fast, kernel=matmul_nf4_kernel)
     else:
-        def mf(inputs, *tensors, kernel=None):
-            return (inputs @ dequantize_vmap(*tensors,
-                                            use_approx=b.use_approx,
-                                            orig_dtype=og_dtype,
-                                            mode="i8" if b.quants.dtype == jnp.int8 else "nf4")).astype(compute_dtype)
+        def dq(*tensors):
+            return dequantize_vmap(*tensors,
+                                    use_approx=b.use_approx,
+                                    orig_dtype=og_dtype,
+                                    mode="i8" if b.quants.dtype == jnp.int8 else "nf4")
+        @partial(jax.custom_vjp)
+        def mf(inputs, *tensors):
+            return (inputs @ dq(*tensors)).astype(compute_dtype)
+
+        def mf_fw(inputs, *tensors):
+            m = dq(*tensors)
+            return (inputs @ m).astype(compute_dtype), (m,)
+
+        def mf_bw(t, grads):
+            m, = t
+            return (grads @ m.T).astype(og_dtype), None, None
+
+        mf.defvjp(mf_fw, mf_bw)
+        mf = jax.remat(mf)
 
     if b.mesh_and_axis is not None:
         mesh, map_axis = b.mesh_and_axis
@@ -572,7 +595,7 @@ def dot_general_handler(
             def matmul(inputs, *tensors):
                 orig_inputs_shape = inputs.shape
                 inputs = inputs.reshape(-1, inputs.shape[-1])
-                outputs = mf(inputs, *tensors, kernel=matmul_nf4_kernel)
+                outputs = mf(inputs, *tensors)
                 outputs = outputs.reshape(*orig_inputs_shape[:-1], outputs.shape[-1])
                 if map_axis == 0:
                     outputs = jax.lax.psum(outputs, axis_name="tp")
@@ -590,7 +613,7 @@ def dot_general_handler(
         elif mesh.shape["fsdp"] == 1:
             def matmul_inner(a, *tensors):
                 a = a.reshape(-1, a.shape[-1])
-                out = mf(a, *tensors, kernel=matmul_nf4_kernel)
+                out = mf(a, *tensors)
                 return out
             a = a.reshape(-1, a.shape[1], a.shape[-1])
             out = jax.experimental.shard_map.shard_map(
@@ -623,7 +646,6 @@ def dot_general_handler(
                     partial_result = mf(
                         inputs.reshape(-1, inputs.shape[-1]),
                         *tensors,
-                        kernel=matmul_nf4_kernel,
                     )
                     partial_result = partial_result.reshape(*inputs.shape[:-1], -1)
                     chunk_size = partial_result.shape[-1]
@@ -640,7 +662,7 @@ def dot_general_handler(
                     )
                     return accum, inputs, tensors
                 accum, inputs, tensors = jax.lax.fori_loop(0, axis_size - 1, loop_body, (accum, inputs, tensors))
-                partial_result = matmul_fast(inputs.reshape(-1, inputs.shape[-1]), *tensors, kernel=matmul_nf4_kernel)
+                partial_result = mf(inputs.reshape(-1, inputs.shape[-1]), *tensors)
                 partial_result = partial_result.reshape(*inputs.shape[:-1], -1)
                 chunk_size = partial_result.shape[-1]
                 i = axis_size - 1
@@ -660,7 +682,7 @@ def dot_general_handler(
     else:
         # Reshape a to be 2-D
         a = a.reshape(-1, b.shape[0])
-        out = mf(a, b.quants, b.scales, kernel=matmul_nf4_kernel)
+        out = mf(a, b.quants, b.scales)
     return out.reshape(*orig_a_shape[:-1], out.shape[-1]).astype(og_dtype)
 
 

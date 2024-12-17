@@ -3,6 +3,7 @@ import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from .vae import FluxVAE
+from .quant import kernel_mode
 import jax.numpy as jnp
 from src.fae.ensemble import FluxEnsemble
 from src.fae.diflayers import VLinear
@@ -48,14 +49,14 @@ class Lora(eqx.Module):
     b: Float[Array, "k m"]
     alpha: float
 
-    def __init__(self, module: VLinear, rank=16, std=0.01, alpha=1., *, key):
+    def __init__(self, module: VLinear, rank=4, std=0.01, alpha=1., *, key):
         self.original = module
         batch_shapes = module.weight.shape[:-2]
         self.a = jax.random.normal(key, batch_shapes + (module.in_channels, rank)) * std
         self.b = jnp.zeros(batch_shapes + (rank, module.out_channels))
         self.alpha = alpha
 
-    def __call__(self, x):
+    def __call__(self, x, **kwargs):
         return self.original(x) + jnp.dot(jnp.dot(x, self.a), self.b) * self.alpha
 
 def add_lora(l):
