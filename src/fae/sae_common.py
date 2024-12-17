@@ -86,6 +86,8 @@ class SAEConfig:
         return self.dead_after_tokens // self.full_batch_size
 
     batch_size: int = 4
+    sae_train_every: int = 16
+    sae_batch_size_multiplier: int = 8
     seq_len: int = 512 + 256
     seq_mode: Literal["both", "txt", "img"] = "both"
     site: tuple[Literal["double", "single"], int] = ("double", 18)
@@ -118,6 +120,10 @@ class SAEConfig:
     @property
     def full_batch_size(self):
         return self.batch_size * self.real_seq_len
+
+    @property
+    def train_batch_size(self):
+        return self.full_batch_size * self.sae_batch_size_multiplier
 
     @property
     def width_and_height(self):

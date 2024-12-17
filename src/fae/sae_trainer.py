@@ -131,7 +131,7 @@ class SAEInfo(eqx.Module):
         not_dead = jnp.zeros(
             self.feature_density.shape, dtype=jnp.uint32
         ).at[outputs.k_indices.flatten()].add(outputs.k_weights.flatten() > self.config.death_threshold)
-        new_feature_density = activations / self.config.full_batch_size
+        new_feature_density = activations / self.config.train_batch_size
         # new_feature_density = (activations > 0).astype(jnp.float32)  # so it's easier to see'
         updated_feature_density = self.feature_density * weighting_factor + new_feature_density * new_weighting_factor
 
@@ -442,7 +442,7 @@ class SAETrainer(eqx.Module):
             "W_dec_norm": self.sae_logic.info.weight_norms["W_dec"],
             "W_enc_grad_norm": self.sae_logic.info.weight_grad_norms["W_enc"],
             "W_dec_grad_norm": self.sae_logic.info.weight_grad_norms["W_dec"],
-            "tokens_processed": self.sae_logic.info.n_steps * self.config.full_batch_size
+            "tokens_processed": self.sae_logic.info.n_steps * self.config.train_batch_size
         }
         return {
             k: (float(v) if not isinstance(v, wandb.Histogram) else v)
@@ -538,6 +538,8 @@ def main(train_mode: bool = True, restore: bool = False):
     config = SAEConfig(
         do_update=train_mode,
         seq_mode="img",
+        sae_train_every=16 if train_mode else 1,
+        sae_batch_size_multiplier=4 if train_mode else 1,
     )
     if not train_mode and not restore:
         logger.warning("Enabling restore")
@@ -552,6 +554,7 @@ def main(train_mode: bool = True, restore: bool = False):
     width, height = config.width_and_height
     appeared_prompts = set()
     cycle_detected = False
+    activation_cache = []
     for step, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
         if len(prompts) < config.batch_size:
             logger.warning("End of dataset")
@@ -577,25 +580,39 @@ def main(train_mode: bool = True, restore: bool = False):
         logger.add(sys.stderr, level="INFO")
         training_data = jnp.concatenate((reaped[18]["txt"], reaped[18]["img"]), axis=-2)[0]
         training_data = config.cut_up(training_data)
-        if step < 1000:
+        if step < 100:
             np.save(f"somewhere/td/{step}.npy", training_data.astype(np.float32))
-        sae_outputs = sae_trainer.step(
-            jax.device_put(
-                training_data,
-                jax.sharding.NamedSharding(sae_trainer.mesh, jax.sharding.PartitionSpec("dp", None))))
-        if not train_mode:
-            sae_weights, sae_indices = map(
-                config.uncut, map(
-                    np.asarray,
-                    jax.block_until_ready(
-                        jax.device_put(
-                            (sae_outputs.k_weights, sae_outputs.k_indices),
-                            jax.devices("cpu")[0]
+        activation_cache.append(np.asarray(training_data))
+        if len(activation_cache) >= config.sae_train_every:
+            assert config.sae_train_every % config.sae_batch_size_multiplier == 0
+            for _ in range(config.sae_train_every // config.sae_batch_size_multiplier):
+                if train_mode:
+                    cache_data = np.concatenate(activation_cache, axis=0)
+                    np.random.shuffle(cache_data)
+                    if len(cache_data) == config.train_batch_size:
+                        training_data, activation_cache = cache_data, []
+                    else:
+                        activation_cache = [cache_data[config.train_batch_size:]]
+                        training_data = cache_data[:config.train_batch_size]
+                else:
+                    assert config.sae_batch_size_multiplier == config.sae_train_every == 1
+                sae_outputs = sae_trainer.step(
+                    jax.device_put(
+                        jnp.asarray(training_data),
+                        jax.sharding.NamedSharding(sae_trainer.mesh, jax.sharding.PartitionSpec("dp", None))))
+                if not train_mode:
+                    sae_weights, sae_indices = map(
+                        config.uncut, map(
+                            np.asarray,
+                            jax.block_until_ready(
+                                jax.device_put(
+                                    (sae_outputs.k_weights, sae_outputs.k_indices),
+                                    jax.devices("cpu")[0]
+                                )
+                            )
                         )
                     )
-                )
-            )
-            saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
+                    saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
 
     print("Waiting for saver to leave...")
 
