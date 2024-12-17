@@ -580,7 +580,7 @@ def dot_general_handler(
 
         def mf_bw(t, grads):
             m, = t
-            return (grads @ m.T).astype(og_dtype), None, None
+            return (grads @ m.T).astype(compute_dtype), None, None
 
         mf.defvjp(mf_fw, mf_bw)
         mf = jax.remat(mf)

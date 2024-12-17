@@ -52,8 +52,9 @@ class Lora(eqx.Module):
     def __init__(self, module: VLinear, rank=4, std=0.01, alpha=1., *, key):
         self.original = module
         batch_shapes = module.weight.shape[:-2]
-        self.a = jax.random.normal(key, batch_shapes + (module.in_channels, rank)) * std
-        self.b = jnp.zeros(batch_shapes + (rank, module.out_channels))
+        dtype = module.weight.dtype
+        self.a = jax.random.normal(key, batch_shapes + (module.in_channels, rank), dtype=dtype) * std
+        self.b = jnp.zeros(batch_shapes + (rank, module.out_channels), dtype=dtype)
         self.alpha = alpha
 
     def __call__(self, x, **kwargs):
@@ -64,10 +65,8 @@ def add_lora(l):
         return l
     return Lora(l, key=next(keygen))
 
-flux = eqx.tree_at(lambda x: x.model, flux,
+flux = eqx.tree_at(lambda x: x.model.img_in, flux,
     replace_fn=lambda m: jax.tree.map(add_lora, m, is_leaf=lambda x: isinstance(x, VLinear)))
-
-ensemble.flux = flux
 
 run = wandb.init(project="fluxtune", entity="neverix")
 
