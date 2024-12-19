@@ -200,6 +200,7 @@ class FluxInferencer(eqx.Module):
             img_ids=img_ids,
             guidance=guidance_scale,
         )
+        # TODO fix this
         if "MockQuantMatrix" in str(self.model):
             patched = call_plain(self.model, **kwargs)
         else:

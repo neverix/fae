@@ -81,7 +81,7 @@ class SequentialScan(eqx.Module, Generic[T]):
             return (layer(carry, *args, **kwargs, layer_idx=i), i + 1), None
 
         # TODO remove this
-        if "MockQuantMatrix" in str("weights"):
+        if "MockQuantMatrix" in str(weights):
             return eqx_scan(scan_fn, (x, jnp.array(0, dtype=jnp.uint32)), weights, kind="checkpointed")[0][0]
         else:
             return jax.lax.scan(scan_fn, (x, jnp.array(0, dtype=jnp.uint32)), weights)[0][0]
