@@ -9,7 +9,6 @@ from .clip import CLIPInterface
 from .t5 import T5EncoderInferencer
 from .flux_inferencer import FluxInferencer, random_or
 from .diflayers import DiFormerConfig
-from oryx.core.interpreters.harvest import sow, call_and_reap
 from jax.experimental import mesh_utils
 from loguru import logger
 

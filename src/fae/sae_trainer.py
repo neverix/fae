@@ -538,8 +538,9 @@ def main(train_mode: bool = True, restore: bool = False):
     config = SAEConfig(
         do_update=train_mode,
         seq_mode="img",
-        sae_train_every=16 if train_mode else 1,
-        sae_batch_size_multiplier=4 if train_mode else 1,
+        **(dict(sae_train_every=1,
+        sae_batch_size_multiplier=1)
+        if not train_mode else {}),
     )
     if not train_mode and not restore:
         logger.warning("Enabling restore")
@@ -580,8 +581,8 @@ def main(train_mode: bool = True, restore: bool = False):
         logger.add(sys.stderr, level="INFO")
         training_data = jnp.concatenate((reaped[18]["txt"], reaped[18]["img"]), axis=-2)[0]
         training_data = config.cut_up(training_data)
-        if step < 100:
-            np.save(f"somewhere/td/{step}.npy", training_data.astype(np.float32))
+        # if step < 100:
+            # np.save(f"somewhere/td/{step}.npy", training_data.astype(np.float32))
         activation_cache.append(np.asarray(training_data))
         if len(activation_cache) >= config.sae_train_every:
             assert config.sae_train_every % config.sae_batch_size_multiplier == 0

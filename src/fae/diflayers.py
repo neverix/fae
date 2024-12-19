@@ -14,6 +14,8 @@ import equinox as eqx
 from equinox import nn
 from functools import partial
 from .interp_globals import post_double_stream
+import qax
+from .quant import MockQuantMatrix, dot_general_handler
 
 
 @dataclass(frozen=True)
@@ -237,7 +239,19 @@ class VLinear(eqx.Module):
         Returns:
             Transformed tensor.
         """
-        y = x @ self.weight
+        if isinstance(self.weight, MockQuantMatrix):
+            # y = qax.use_implicit_args(lambda x, w: x @ w)(x, MockQuantMatrix.unmockify(self.weight))
+            y = dot_general_handler(
+                jax.lax.dot_general_p,
+                # x, MockQuantMatrix.unmockify(self.weight),
+                x,
+                self.weight,  # let's pretend this is a real QuantMatrix
+                # dimension_numbers=(([x.ndim - 1], [0]), (list(range(x.ndim - 1)), [])))
+                # dimension_numbers=(((1,), (0,)), ((0,), ())))
+                dimension_numbers=(((x.ndim - 1,), (0,)), ((), ())))
+            # y = self.weight.matmul(x)
+        else:
+            y = x @ self.weight
         if self.bias is not None:
             y = y + self.bias
         return y

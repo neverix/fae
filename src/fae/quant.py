@@ -1,5 +1,6 @@
 from typing import Optional, Tuple, Sequence, List
 import jax
+from equinox import Module
 from dataclasses import dataclass
 import dataclasses
 import jax.experimental
@@ -467,7 +468,7 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=True):
 
     def materialize(self):
         if self.use_kernel:
-        #     # We should never materialize if we're trying to use the kernel
+            # We should never materialize if we're trying to use the kernel
             raise NotImplementedError
 
         return self.dequantize()
@@ -504,6 +505,20 @@ class QuantMatrix(qax.ImplicitArray, warn_on_materialize=True):
         new_quant_matrix = jax.device_put(new_quant_matrix, quant_sharding)
         return new_quant_matrix
 
+    # @classmethod
+    # def default_handler(cls, primitive, *args, params=None):
+    #     if params is None:
+    #         params = {}
+    #     # print("aaaa", type(primitive), primitive, [str(a)[:50] for a in args], {
+    #     #     k: str(v)[:50] for k, v in params.items()
+    #     # })
+    # #     # print("aa", primitive, args, params)
+    # #     # exit()
+    #     subfuns, bind_params = primitive.get_bind_params(params)
+    #     # return qax.use_implicit_args(primitive.bind)(*subfuns, *args, **bind_params)
+    #     return primitive.bind(*subfuns, *args, **bind_params)
+    #     # return materialize_handler(primitive, *args, params=params)
+
 
 @qax.primitive_handler("slice")
 def slice_handler(
@@ -530,8 +545,6 @@ def squeeze_handler(
         scales=jax.lax.squeeze(a.scales, dimensions),
     )
 
-
-@qax.primitive_handler("dot_general")
 def dot_general_handler(
     primitive, a: jax.Array, b: QuantMatrix, *, dimension_numbers, **kwargs
 ):
@@ -570,6 +583,7 @@ def dot_general_handler(
                                     use_approx=b.use_approx,
                                     orig_dtype=og_dtype,
                                     mode="i8" if b.quants.dtype == jnp.int8 else "nf4")
+
         @partial(jax.custom_vjp)
         def mf(inputs, *tensors):
             return (inputs @ dq(*tensors)).astype(compute_dtype)
@@ -685,6 +699,64 @@ def dot_general_handler(
         out = mf(a, b.quants, b.scales)
     return out.reshape(*orig_a_shape[:-1], out.shape[-1]).astype(og_dtype)
 
+
+qax.primitive_handler("dot_general")(dot_general_handler)
+
+def is_arr(x):
+    return isinstance(x, qax.primitives.ArrayValue)
+
+
+class MockQuantMatrix(Module):
+    quants: jnp.ndarray
+    scales: jnp.ndarray
+
+    use_approx: bool = qax.aux_field()
+    use_kernel: bool = qax.aux_field()
+    orig_dtype: jnp.dtype = qax.aux_field()
+
+    mesh_and_axis: Optional[Tuple[jax.sharding.Mesh, Optional[int]]] = qax.aux_field()
+
+    def __repr__(self):
+        return f"MockQuantMatrix(quants={self.quants.shape}, scales={self.scales.shape}, use_approx={self.use_approx}, use_kernel={self.use_kernel}, orig_dtype={self.orig_dtype}, mesh_and_axis=something)"
+
+    @classmethod
+    def mockify(cls, pytree):
+        def _mockify(x):
+            if not isinstance(x, QuantMatrix):
+                return x
+            return MockQuantMatrix(**{k: getattr(x, k) for k in {"quants", "scales", "use_approx", "use_kernel", "orig_dtype", "mesh_and_axis"}})
+        return jax.tree.map(_mockify, pytree, is_leaf=is_arr)
+
+    @classmethod
+    def unmockify(cls, pytree):
+        def _unmockify(x):
+            if not isinstance(x, MockQuantMatrix):
+                return x
+            return QuantMatrix(**{k: getattr(x, k) for k in {"quants", "scales", "use_approx", "use_kernel", "orig_dtype", "mesh_and_axis"}})
+        return jax.tree.map(_unmockify, pytree, is_leaf=lambda x: is_arr(x) or isinstance(x, MockQuantMatrix))
+
+    @property
+    def shape(self):
+        return self.quants.shape[:-3] + (
+            self.quants.shape[-3] * self.quants.shape[-2],
+            self.quants.shape[-1],
+        )
+
+    @property
+    def dtype(self):
+        return self.orig_dtype
+
+# # https://github.com/jax-ml/jax/blob/main/jax/experimental/jet.py
+# def process_custom_vjp_call(self, primitive, fun, fwd, bwd, tracers, out_trees, *args, **kwargs):
+#     del primitive, fwd, bwd, out_trees  # Unused.
+#     return fun.call_wrapped(*tracers)
+# def process_custom_jvp_call(self, primitive, fun, jvp, tracers, *,
+#                               symbolic_zeros):
+#     del primitive, jvp  # Unused.
+#     return fun.call_wrapped(*tracers)
+# from qax.implicit.implicit_array import ImplicitArrayTrace
+# ImplicitArrayTrace.process_custom_vjp_call = process_custom_vjp_call
+# ImplicitArrayTrace.process_custom_jvp_call = process_custom_jvp_call
 
 def quantize_groups(group, codebook, mode="nf4"):
     group = group.astype(jnp.float32)

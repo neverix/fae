@@ -1,6 +1,6 @@
 # https://github.com/black-forest-labs/flux/blob/main/src/flux/model.py
 import equinox as eqx
-from equinox.internal._loop import while_loop
+from equinox.internal._loop import scan as eqx_scan
 from equinox import nn
 import jax.experimental
 import jax.experimental.shard_map
@@ -10,7 +10,7 @@ from collections import defaultdict
 from huggingface_hub import hf_hub_download
 from jaxtyping import Array, Float, UInt
 from typing import Optional
-from .quant import QuantMatrix
+from .quant import QuantMatrix, MockQuantMatrix
 from .quant_loading import load_thing, save_thing
 import qax.primitives
 import qax
@@ -55,27 +55,36 @@ class SequentialScan(eqx.Module, Generic[T]):
     # @eqx.filter_checkpoint
     def __call__(self, x, *args, **kwargs):
         weights, logic = eqx.partition(self.layer, is_arr)
-        def scan_fn(carry):
-            carry, i = carry
-            weight = jax.tree.map(lambda x: x[i] if is_arr(x) else x, weights, is_leaf=is_arr)
-            layer = eqx.combine(weight, logic)
-            return (layer(carry, *args, **kwargs, layer_idx=i), i + 1)
+        # weights_mock = MockQuantMatrix.mockify(weights)
 
-        return while_loop(
-            lambda *args, **kwargs: jnp.array(True),
-            scan_fn,
-            (x, jnp.array(0, dtype=jnp.uint32)),
-            max_steps=self.n_layers,
-            kind="checkpointed"
-        )[0]
+        # def scan_fn(carry):
+        #     carry, i = carry
+        #     layer = jax.tree.map(lambda x: x[i] if is_arr(x) else x, layer_mock, is_leaf=is_arr)
+        #     layer = MockQuantMatrix.unmockify(layer)
+        #     return (layer(carry, *args, **kwargs, layer_idx=i), i + 1)
+
+        # return while_loop(
+        #     lambda *args, **kwargs: jnp.array(True),
+        #     scan_fn,
+        #     (x, jnp.array(0, dtype=jnp.uint32)),
+        #     max_steps=self.n_layers,
+        #     kind="checkpointed"
+        # )[0]
 
         # @jax.remat
-        # def scan_fn(carry, weight: T):
-        #     carry, i = carry
-        #     layer = eqx.combine(weight, logic)
-        #     return (layer(carry, *args, **kwargs, layer_idx=i), i + 1), None
+        def scan_fn(carry, weight: T):
+            carry, i = carry
+            # print("---", weight)
+            # weight = MockQuantMatrix.unmockify(weight)
+            # print("===", weight)
+            layer = eqx.combine(weight, logic)
+            return (layer(carry, *args, **kwargs, layer_idx=i), i + 1), None
 
-        # return jax.lax.scan(scan_fn, (x, jnp.array(0, dtype=jnp.uint32)), weights)[0][0]
+        # TODO remove this
+        if "MockQuantMatrix" in str("weights"):
+            return eqx_scan(scan_fn, (x, jnp.array(0, dtype=jnp.uint32)), weights, kind="checkpointed")[0][0]
+        else:
+            return jax.lax.scan(scan_fn, (x, jnp.array(0, dtype=jnp.uint32)), weights)[0][0]
 
     def __getattr__(self, name):
         return getattr(self.layer, name)

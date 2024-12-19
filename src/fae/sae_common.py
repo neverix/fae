@@ -87,7 +87,7 @@ class SAEConfig:
 
     batch_size: int = 4
     sae_train_every: int = 16
-    sae_batch_size_multiplier: int = 8
+    sae_batch_size_multiplier: int = 1
     seq_len: int = 512 + 256
     seq_mode: Literal["both", "txt", "img"] = "both"
     site: tuple[Literal["double", "single"], int] = ("double", 18)

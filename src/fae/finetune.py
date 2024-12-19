@@ -1,9 +1,11 @@
 from numpy import add
 import torch
+from functools import partial
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from .vae import FluxVAE
 from .quant import kernel_mode
+from .quant import MockQuantMatrix, QuantMatrix, is_arr
 import jax.numpy as jnp
 from src.fae.ensemble import FluxEnsemble
 from src.fae.diflayers import VLinear
@@ -70,10 +72,28 @@ flux = eqx.tree_at(lambda x: x.model.img_in, flux,
 
 run = wandb.init(project="fluxtune", entity="neverix")
 
-@eqx.filter_value_and_grad(has_aux=True)
-def loss_fn(flux, inputs):
-    result = flux(*inputs)
+# from .quant import MockQuantMatrix
+# print("---", MockQuantMatrix.mockify(flux))
+# import equinox._ad
+
+# @eqx.filter_value_and_grad(has_aux=True)
+# def loss_fn(flux, inputs):
+#     result = flux(*inputs)
+#     return result.loss, result
+
+@partial(jax.value_and_grad, has_aux=True)
+def loss_fn_(flux_good, flux_bad, inputs):
+    result = eqx.combine(flux_good, flux_bad)(*inputs)
     return result.loss, result
+
+def loss_fn(flux, inputs):
+    flux_good, flux_bad = eqx.partition(
+        flux,
+        lambda x: is_arr(x) and (not any(c == jnp.dtype(x).kind for c in "biu")) and (not isinstance(x, (QuantMatrix, FluxVAE))),
+        is_leaf=lambda x: is_arr(x) or isinstance(x, FluxVAE))
+    flux_bad = MockQuantMatrix.mockify(flux_bad)
+    (loss, image_output), grads = loss_fn_(flux_good, flux_bad, inputs)
+    return (loss, image_output), grads
 
 # Iterate through batches
 texts = ["Background"]
