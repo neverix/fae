@@ -446,8 +446,7 @@ def preprocess_official(flux, model):
             og_shape = og_tensor.shape
             og_dtype = og_tensor.dtype
         x = x.astype(jnp.bfloat16)
-        if "mod" in key or any(s in key for s in
-                               ("vector_in", "guidance_in")):
+        if any(s in key for s in ("vector_in", "guidance_in")):
             array_flux[key] = x
             continue
         x = QuantMatrix.quantize(x, mode="nf4", group_size=64)

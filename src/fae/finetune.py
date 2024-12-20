@@ -1,6 +1,7 @@
 from numpy import add
 import torch
 from functools import partial
+import optax
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from .vae import FluxVAE
@@ -28,7 +29,6 @@ transform = transforms.Compose([
 ])
 
 # Load dataset from a folder
-# Replace 'path/to/your/folder' with the actual path to your folder containing images
 dataset = datasets.ImageFolder(root="somewhere/finetune_data", transform=transform,)
 
 # DataLoader to iterate through the dataset in batches of size 4
@@ -49,7 +49,7 @@ class Lora(eqx.Module):
     original: VLinear
     a: Float[Array, "n k"]
     b: Float[Array, "k m"]
-    alpha: float
+    alpha: float = eqx.field(static=True)
 
     def __init__(self, module: VLinear, rank=4, std=0.01, alpha=1., *, key):
         self.original = module
@@ -67,7 +67,7 @@ def add_lora(l):
         return l
     return Lora(l, key=next(keygen))
 
-flux = eqx.tree_at(lambda x: x.model.img_in, flux,
+flux = eqx.tree_at(lambda x: x.model, flux,
     replace_fn=lambda m: jax.tree.map(add_lora, m, is_leaf=lambda x: isinstance(x, VLinear)))
 
 run = wandb.init(project="fluxtune", entity="neverix")
@@ -82,31 +82,65 @@ run = wandb.init(project="fluxtune", entity="neverix")
 #     return result.loss, result
 
 @partial(jax.value_and_grad, has_aux=True)
-def loss_fn_(flux_good, flux_bad, inputs):
+def loss_fn(flux_good, flux_bad, inputs):
     result = eqx.combine(flux_good, flux_bad)(*inputs)
     return result.loss, result
 
-def loss_fn(flux, inputs):
-    flux_good, flux_bad = eqx.partition(
-        flux,
-        lambda x: is_arr(x) and (not any(c == jnp.dtype(x).kind for c in "biu")) and (not isinstance(x, (QuantMatrix, FluxVAE))),
-        is_leaf=lambda x: is_arr(x) or isinstance(x, FluxVAE))
+def flux_split(flux):
+    return eqx.partition(
+            flux,
+            lambda x: is_arr(x) and (not any(c == jnp.dtype(x).kind for c in "biu")) and (not isinstance(x, (QuantMatrix, FluxVAE))),
+            is_leaf=lambda x: is_arr(x) or isinstance(x, FluxVAE))
+
+# def flux_split(flux):
+#     flux = MockQuantMatrix.mockify(flux)
+#     flux_good, flux_bad = eqx.partition(
+#             flux,
+#             lambda x: isinstance(x, Lora),
+#             is_leaf=lambda x: is_arr(x) or isinstance(x, Lora))
+#     def filter_original(x, for_train=False):
+#         if not isinstance(x, Lora):
+#             return x
+#         if for_train:
+#             return eqx.tree_at(lambda x: x.original, x, None)
+#         else:
+#             x = eqx.tree_at(lambda x: x.a, x, None)
+#             x = eqx.tree_at(lambda x: x.b, x, None)
+#             return x
+#     def filter_tree(x, **kwargs):
+#         return jax.tree.map(partial(filter_original, **kwargs), x, is_leaf=lambda x: is_arr(x) or isinstance(x, Lora))
+#     flux_bad_ = filter_tree(flux_good, for_train=False)
+#     flux_good = filter_tree(flux_good, for_train=True)
+#     flux_bad = eqx.combine(flux_bad, flux_bad_, is_leaf=is_arr)
+#     return flux_good, flux_bad
+
+optimizer = optax.adam(1e-5)
+opt_state = eqx.filter_jit(lambda flux: optimizer.init(flux_split(flux)[0]))(flux)
+
+# @partial(jax.jit, donate_argnums=(0, 1))
+# @jax.jit
+@eqx.filter_jit(donate="all-except-first")
+def train_step(inputs, flux, opt_state):
+    flux_good, flux_bad = flux_split(flux)
     flux_bad = MockQuantMatrix.mockify(flux_bad)
-    (loss, image_output), grads = loss_fn_(flux_good, flux_bad, inputs)
-    return (loss, image_output), grads
+    (loss, image_output), grads = loss_fn(flux_good, flux_bad, inputs)
+    updates, new_state = optimizer.update(grads, opt_state)
+    updated = eqx.combine(MockQuantMatrix.unmockify(flux_bad), optax.apply_updates(flux_good, updates), is_leaf=lambda x: is_arr(x) or isinstance(x, FluxVAE))
+    return (loss, image_output), new_state, updated
 
 # Iterate through batches
 texts = ["Background"]
-for batch_idx, (images, labels) in enumerate(data_loader):
-    text_batch = [texts[i] for i in labels]
-    inputs = ensemble.prepare_stuff(
-        text_batch, images=jnp.asarray(images.numpy()),
-        image_input_kwargs=dict(already_preprocessed=True, timesteps=None))
-    (loss, image_output), grads = loss_fn(flux, inputs)
-    run.log({"loss": loss})
-    if batch_idx % 100 == 0:
-        ensemble.flux = flux
-        images = ensemble.sample(text_batch, width=WIDTH, height=HEIGHT, sample_steps=20)
-        for i, image in enumerate(images):
-            os.makedirs("somewhere/finetune_output", exist_ok=True)
-            image.save(f"somewhere/finetune_output/{batch_idx}_{i}.png")
+for _ in range(100):
+    for batch_idx, (images, labels) in enumerate(data_loader):
+        text_batch = [texts[i] for i in labels]
+        inputs = ensemble.prepare_stuff(
+            text_batch, images=jnp.asarray(images.numpy()),
+            image_input_kwargs=dict(already_preprocessed=True, timesteps=None))
+        (loss, image_output), opt_state, flux = train_step(inputs, flux, opt_state)
+        run.log({"loss": loss})
+        if batch_idx % 100 == 0:
+            ensemble.flux = flux
+            images = ensemble.sample(text_batch, width=WIDTH, height=HEIGHT, sample_steps=20)
+            for i, image in enumerate(images):
+                os.makedirs("somewhere/finetune_output", exist_ok=True)
+                image.save(f"somewhere/finetune_output/{batch_idx}_{i}.png")
