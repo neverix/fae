@@ -51,7 +51,7 @@ class Lora(eqx.Module):
     b: Float[Array, "k m"]
     alpha: float = eqx.field(static=True)
 
-    def __init__(self, module: VLinear, rank=4, std=0.01, alpha=1., *, key):
+    def __init__(self, module: VLinear, rank=16, std=0.01, alpha=1., *, key):
         self.original = module
         batch_shapes = module.weight.shape[:-2]
         dtype = module.weight.dtype
@@ -114,7 +114,9 @@ def flux_split(flux):
 #     flux_bad = eqx.combine(flux_bad, flux_bad_, is_leaf=is_arr)
 #     return flux_good, flux_bad
 
-optimizer = optax.adam(1e-5)
+EPOCHS = 200
+scheduler = optax.schedules.warmup_cosine_decay_schedule(0.0, 1e-5, 50, EPOCHS * len(data_loader))
+optimizer = optax.adam(scheduler)
 opt_state = eqx.filter_jit(lambda flux: optimizer.init(flux_split(flux)[0]))(flux)
 
 # @partial(jax.jit, donate_argnums=(0, 1))
@@ -130,8 +132,9 @@ def train_step(inputs, flux, opt_state):
 
 # Iterate through batches
 texts = ["Background"]
-for _ in range(100):
-    for batch_idx, (images, labels) in enumerate(data_loader):
+batch_idx = 0
+for _ in range(EPOCHS):
+    for images, labels in data_loader:
         text_batch = [texts[i] for i in labels]
         inputs = ensemble.prepare_stuff(
             text_batch, images=jnp.asarray(images.numpy()),
@@ -144,3 +147,4 @@ for _ in range(100):
             for i, image in enumerate(images):
                 os.makedirs("somewhere/finetune_output", exist_ok=True)
                 image.save(f"somewhere/finetune_output/{batch_idx}_{i}.png")
+        batch_idx += 1
