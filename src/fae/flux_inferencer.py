@@ -14,10 +14,10 @@ from .diformer import DiFormer, is_arr
 import equinox as eqx
 from .diflayers import global_mesh
 import qax
-from typing import Optional
+from typing import Union
 from jax.experimental import mesh_utils
 import ml_dtypes
-from .vae import FluxVAE
+from .vae import FluxVAE, FluxVAEHQ
 
 
 def random_or(key):
@@ -142,7 +142,7 @@ call_plain = eqx.filter_jit(lambda arg, **kwargs: arg(**kwargs))
 
 class FluxInferencer(eqx.Module):
     mesh: jax.sharding.Mesh = eqx.field(static=True)
-    vae: FluxVAE
+    vae: Union[FluxVAE, FluxVAEHQ]
     model: DiFormer
 
     def __init__(
@@ -159,7 +159,10 @@ class FluxInferencer(eqx.Module):
         self.mesh = mesh
 
         logger.info("Creating VAE")
-        self.vae = FluxVAE(*vae_args)
+        if "hq" in vae_args:
+            self.vae = FluxVAEHQ()
+        else:
+            self.vae = FluxVAE(*vae_args)
 
         with jax.default_device(jax.devices("cpu")[0]):
             logger.info("Creating model")

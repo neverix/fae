@@ -20,6 +20,7 @@ class FluxEnsemble:
         diformer_kwargs: dict = None,
         clip_name=None,
         t5_name=None,
+        flux_kwargs: dict = {}
     ):
         self.use_schnell = use_schnell
         curve_schedule = True
@@ -54,7 +55,7 @@ class FluxEnsemble:
         logger.info("Creating Flux")
         if diformer_kwargs is None:
             diformer_kwargs = {}
-        self.flux = FluxInferencer(self.mesh, diformer_kwargs=diformer_kwargs)
+        self.flux = FluxInferencer(self.mesh, diformer_kwargs=diformer_kwargs, **flux_kwargs)
 
     def prepare_stuff(self, texts, key=None, width=None, height=None, images=None,
                       image_input_kwargs={}):

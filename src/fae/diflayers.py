@@ -4,7 +4,6 @@ import threading
 from typing import Optional, Tuple
 import jax
 import jax.numpy as jnp
-from oryx.core import sow
 from einops import rearrange
 from jax.experimental.pallas.ops.tpu import flash_attention
 import jax.experimental
@@ -535,9 +534,6 @@ class DoubleStreamBlock(eqx.Module):
         txt = txt + fg(txt_out1)
         txt_out2 = txt_mod2.gate * self.txt_mlp(txt_mod2(self.txt_norm2(txt)))
         txt = txt + fg(txt_out2)
-
-        sow(img, tag="interp", name="double_img", mode="append")
-        sow(txt, tag="interp", name="double_txt", mode="append")
 
         result = dict(img=fr(img), txt=fr(txt))
         post_double_stream.jax_callback(layer_idx, result)

@@ -7,7 +7,9 @@ description = "Flux SAE"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "accelerate>=1.2.1",
     "datasets>=2.19.1",
+    "diffusers>=0.31.0",
     "einops>=0.8.0",
     "equinox>=0.11.10",
     "fastapi>=0.115.4",
