@@ -7,6 +7,8 @@ Flux implementation with SAEs
 uv sync
 mkdir -p somewhere
 git lfs clone https://huggingface.co/nev/taef1 somewhere/taef1
+uv run python -m src.fae.t5
+uv run python -m src.fae.sae_trainer
 uv run python -m src.fae.server
 ```
 

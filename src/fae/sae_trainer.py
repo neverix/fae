@@ -13,7 +13,7 @@ from loguru import logger
 from tqdm.auto import tqdm
 from optax._src.linear_algebra import global_norm
 import optax
-import heapq
+import os
 import queue
 import jax.numpy as jnp
 import equinox as eqx
@@ -28,7 +28,7 @@ from typing import Sequence
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from .sae_common import SAEConfig, SAEOutputSaver
-from .interp_globals import post_double_stream
+from .interp_globals import post_double_stream, post_single_stream
 import threading
 
 
@@ -528,7 +528,7 @@ class SAEOverseer:
         return self.sae_trainer.mesh
 
 
-def main(train_mode: bool = True, restore: bool = False):
+def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block_type = "double", layer = 18):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
     prompts_iterator = prompts_dataset["train"]["caption_llava_short"]
@@ -537,7 +537,7 @@ def main(train_mode: bool = True, restore: bool = False):
     logger.info("Creating SAE trainer")
     config = SAEConfig(
         do_update=train_mode,
-        seq_mode="img",
+        seq_mode=seq_mode,
         **(dict(sae_train_every=1,
         sae_batch_size_multiplier=1)
         if not train_mode else {}),
@@ -568,7 +568,9 @@ def main(train_mode: bool = True, restore: bool = False):
             appeared_prompts |= new_prompts
         key = jax.random.key(step)
         logger.remove()
-        with post_double_stream.capture(18) as reaped:
+        with (post_double_stream if block_type == "double" else
+              post_single_stream if block_type == "single" else NotImplemented
+              ).capture(layer) as reaped:
             images = ensemble.sample(
                 prompts,
                 decode_latents=False,
@@ -579,10 +581,15 @@ def main(train_mode: bool = True, restore: bool = False):
             )
         assert isinstance(images, jnp.ndarray)  # to silence mypy
         logger.add(sys.stderr, level="INFO")
-        training_data = jnp.concatenate((reaped[18]["txt"], reaped[18]["img"]), axis=-2)[0]
+        if block_type =="double":
+            training_data = jnp.concatenate((reaped[layer]["txt"], reaped[layer]["img"]), axis=-2)[0]
+        else:
+            training_data = reaped[layer]
         training_data = config.cut_up(training_data)
-        # if step < 100:
-            # np.save(f"somewhere/td/{step}.npy", training_data.astype(np.float32))
+        if step < 25:
+            pardir = f"somewhere/{'t' if seq_mode == 'txt' else ('is' if block_type == 'single' else 'id')}d"
+            os.makedirs(pardir, exist_ok=True)
+            np.save(f"{pardir}/{step}.npy", training_data.astype(np.float32))
         activation_cache.append(np.asarray(training_data))
         if len(activation_cache) >= config.sae_train_every:
             assert config.sae_train_every % config.sae_batch_size_multiplier == 0

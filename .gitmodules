@@ -1,6 +1,6 @@
 [submodule "jort"]
 	path = jort
 	url = https://github.com/neverix/jaxonnxruntime
-[submodule "flux_orig/"]
+[submodule "flux_orig"]
 	path = flux_orig
 	url = https://github.com/neverix/flux

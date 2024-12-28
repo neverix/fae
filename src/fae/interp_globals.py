@@ -32,8 +32,7 @@ class InterpHelper(object):
     def jax_callback(self, layer_idx, value):
         jax.debug.callback(
             lambda i, a: self._cvar.get(int(i), lambda x: None)(a), layer_idx, value)
-        # jax.experimental.io_callback(
-        #     lambda i, a: self._cvar.get(int(i), lambda x: None)(a), None, layer_idx, value)
 
 
-post_double_stream = InterpHelper('post_double_stream')
+post_double_stream = InterpHelper("post_double_stream")
+post_single_stream = InterpHelper("post_single_stream")

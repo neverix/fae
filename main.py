@@ -16,6 +16,7 @@ CACHE_DIRECTORY = "somewhere/maxacts"
 HEIGHT, WIDTH = 16, 16
 vae = FluxVAE("somewhere/taef1/taef1_encoder.onnx", "somewhere/taef1/taef1_decoder.onnx")
 cache_dir = Path(CACHE_DIRECTORY)
+image_activations_dir = cache_dir / "image_activations" 
 image_cache_dir = Path("somewhere/img_cache")
 if image_cache_dir.exists():
     shutil.rmtree(image_cache_dir)
@@ -59,8 +60,7 @@ def top_features():
     # metric[maxima < 5] = np.inf
     # correct_order = np.argsort(metric)
     # matches = np.arange(len(scored_storage))[maxima > 3.5]
-    matches = np.arange(len(scored_storage))[maxima > 3]
-    # matches = np.arange(len(scored_storage))[frequencies > 0.0002]
+    matches = np.arange(len(scored_storage))[(maxima > 3) & (frequencies < 0.0031)]
     correct_order = np.random.permutation(matches)
     top_few = correct_order[:256].tolist()
     return Div(
@@ -78,6 +78,22 @@ def feature_counts():
     counts = {key: int(val) for key, val in enumerate(counts)}
     return JSONResponse(counts)
 
+@rt("/fry_plot")
+def fry_plot():
+    counts = scored_storage.key_counts()
+    maxima = scored_storage.key_maxima()
+    img_list = list(image_activations_dir.glob("*.npz"))
+    print(img_list)
+    batch_numbers = [int(img.stem.partition("_")[0]) for img in img_list]
+    seq_numbers = [int(img.stem.split("_")[1]) for img in img_list]
+    frequencies = counts.astype(np.float64) / (max(batch_numbers) * (max(seq_numbers) + 1))
+    return plotly2fasthtml(px.scatter(
+        x=frequencies,
+        y=maxima,
+        labels={"x": "Frequency", "y": "Max Activation"},
+        title="Fry Plot"
+    ))
+
 @rt("/maxacts/{feature_id}")
 def maxacts(feature_id: int):
     rows = scored_storage.get_rows(feature_id)
@@ -94,8 +110,8 @@ def maxacts(feature_id: int):
 
     # Prepare images and cards
     imgs = []
-    for (step, idx), grid in sorted(grouped_rows.items(), key=lambda x: x[1].max(), reverse=True):
-        full_activations = np.load(cache_dir / "image_activations" / f"{step}_{idx}.npz")
+    for (step, idx), grid in sorted(grouped_rows.items(), key=lambda x: x[1].max(), reverse=True)[:20]:
+        full_activations = np.load(image_activations_dir / f"{step}_{idx}.npz")
         gravel = grid.ravel()
         k = full_activations["arr_0"].shape[1]
         for i, (f, w) in enumerate(zip(full_activations["arr_0"].ravel(), full_activations["arr_1"].ravel())):

@@ -12,7 +12,7 @@ from jaxtyping import Array, Bool, Float
 import equinox as eqx
 from equinox import nn
 from functools import partial
-from .interp_globals import post_double_stream
+from .interp_globals import post_double_stream, post_single_stream
 import qax
 from .quant import MockQuantMatrix, dot_general_handler
 
@@ -580,5 +580,7 @@ class SingleStreamBlock(eqx.Module):
         par_out = attn_out + mlp_out
         out = data + fg(mod.gate * par_out)
         out = fr(out)
+        
+        post_single_stream.jax_callback(layer_idx, out)        
 
         return out
