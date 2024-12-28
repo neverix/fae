@@ -464,6 +464,9 @@ def fg(x):
 
 def fr(x):
     """Fix residual."""
+    # return jnp.clip(x, -1024, 1024)
+    # return jnp.clip(x, -8192, 8192)
+    # return jnp.clip(x, -4096, 4096)
     # return jnp.clip(x, -32768, 32768)
     return x
 

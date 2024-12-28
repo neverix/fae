@@ -85,6 +85,8 @@ class SAEInfo(eqx.Module):
     config: SAEConfig = eqx.field(static=True)
     n_steps: UInt[Array, ""]
     avg_norm: Float[Array, ""]
+    feature_means: Float[Array, "d_model"]  # Per-feature means
+    feature_square_means: Float[Array, "d_model"]  # Per-feature standard deviations
     feature_density: Float[Array, "n_features"]
     activated_in: UInt[Array, "batch_size n_features"]
     weight_norms: dict
@@ -98,6 +100,8 @@ class SAEInfo(eqx.Module):
             config=config,
             n_steps=jnp.zeros(()),
             avg_norm=jnp.ones(()),
+            feature_means=jnp.zeros((config.d_model,)),
+            feature_square_means=jnp.zeros((config.d_model,)),
             feature_density=jnp.zeros((config.n_features,)),
             activated_in=jnp.zeros((config.n_features,), dtype=jnp.uint32),
             grad_clip_percent=jnp.zeros(()),
@@ -110,11 +114,17 @@ class SAEInfo(eqx.Module):
     def tgt_norm(self):
         return math.sqrt(self.config.d_model)
 
+    @property
+    def feature_stds(self):
+        return jnp.sqrt(jnp.maximum(self.feature_square_means - jnp.square(self.feature_means), 1e-6))
+
     def norm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
-        return x / self.avg_norm * self.tgt_norm
+        return (x - self.feature_means) / self.feature_stds
+        # return x / self.avg_norm * self.tgt_norm
 
     def denorm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
-        return x / self.tgt_norm * self.avg_norm
+        return x * self.feature_stds + self.feature_means
+        # return x / self.tgt_norm * self.avg_norm
 
     def step(self, sae: "SAE", updates: "SAE", grads: "SAE", outputs: SAEOutput):
         weighting_factor, new_weighting_factor = self.n_steps / (self.n_steps + 1), 1 / (self.n_steps + 1)
@@ -122,8 +132,16 @@ class SAEInfo(eqx.Module):
         if self.config.do_update:
             new_avg_norm = jnp.mean(jnp.linalg.norm(outputs.x, axis=-1))
             updated_avg_norm = self.avg_norm * weighting_factor + new_avg_norm * new_weighting_factor
+            
+            new_feature_means = jnp.mean(outputs.x, axis=0)  # Per-feature mean
+            new_feature_square_means = jnp.mean(jnp.square(outputs.x), axis=0)    # Per-feature std
+
+            updated_feature_means = self.feature_means * weighting_factor + new_feature_means * new_weighting_factor
+            updated_feature_square_means = self.feature_square_means * weighting_factor + new_feature_square_means * new_weighting_factor
         else:
             updated_avg_norm = self.avg_norm
+            updated_feature_means = self.feature_means
+            updated_feature_square_means = self.feature_square_means
 
         activations = jnp.zeros(
             self.feature_density.shape, dtype=jnp.uint32
@@ -160,12 +178,14 @@ class SAEInfo(eqx.Module):
         return replace(self,
             n_steps=self.n_steps + 1,
             avg_norm=updated_avg_norm,
+            feature_means=updated_feature_means,  # Update per-feature means
+            feature_square_means=updated_feature_square_means,  # Update per-feature stds
             feature_density=updated_feature_density,
             activated_in=updated_activated_in,
             grad_global_norm=updated_grad_global_norm,
             grad_clip_percent=updated_grad_clip_percent,
             weight_norms=new_weight_norms,
-            weight_grad_norms=new_weight_grad_norms
+            weight_grad_norms=new_weight_grad_norms,
         )
 
     @classmethod
@@ -174,6 +194,8 @@ class SAEInfo(eqx.Module):
             config=config,
             n_steps=P(),
             avg_norm=P(),
+            feature_means=P(None),
+            feature_square_means=P(None),
             feature_density=P("tp"),
             activated_in=P("tp"),
             grad_clip_percent=P(),
@@ -556,6 +578,7 @@ def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block
     appeared_prompts = set()
     cycle_detected = False
     activation_cache = []
+    # normalization_hack = None
     for step, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
         if len(prompts) < config.batch_size:
             logger.warning("End of dataset")
@@ -604,6 +627,10 @@ def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block
                         training_data = cache_data[:config.train_batch_size]
                 else:
                     assert config.sae_batch_size_multiplier == config.sae_train_every == 1
+                # if normalization_hack is None:
+                #     normalization_hack = 1 / training_data.std(axis=0)
+                # else:
+                #     training_data = training_data * normalization_hack
                 sae_outputs = sae_trainer.step(
                     jax.device_put(
                         jnp.asarray(training_data),

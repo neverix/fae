@@ -2,13 +2,16 @@ import os
 os.environ["JAX_PLATFORMS"] = "cpu"
 from fasthtml.common import fast_app, serve
 from fasthtml.common import FileResponse, JSONResponse
-from fasthtml.common import Img, Div, Card, P, Table, Tbody, Tr, Td, A, H1, H2
+from fasthtml.common import (
+    Img, Div, Card, P, Table, Tbody, Tr, Td, A, H1, H2,
+    Form, Button, Input)
 from src.fae.vae import FluxVAE
 from src.fae.sae_common import SAEConfig, nf4
 from src.fae.scored_storage import ScoredStorage
 import numpy as np
 from pathlib import Path
 import shutil
+import requests
 from fh_plotly import plotly_headers, plotly2fasthtml
 import plotly.express as px
 
@@ -60,7 +63,9 @@ def top_features():
     # metric[maxima < 5] = np.inf
     # correct_order = np.argsort(metric)
     # matches = np.arange(len(scored_storage))[maxima > 3.5]
-    matches = np.arange(len(scored_storage))[(maxima > 3) & (frequencies < 0.0031)]
+    cond = maxima > 3
+    # cond &= frequencies < 0.0031
+    matches = np.arange(len(scored_storage))[cond]
     correct_order = np.random.permutation(matches)
     top_few = correct_order[:256].tolist()
     return Div(
@@ -83,7 +88,6 @@ def fry_plot():
     counts = scored_storage.key_counts()
     maxima = scored_storage.key_maxima()
     img_list = list(image_activations_dir.glob("*.npz"))
-    print(img_list)
     batch_numbers = [int(img.stem.partition("_")[0]) for img in img_list]
     seq_numbers = [int(img.stem.split("_")[1]) for img in img_list]
     frequencies = counts.astype(np.float64) / (max(batch_numbers) * (max(seq_numbers) + 1))
@@ -170,12 +174,60 @@ def maxacts(feature_id: int):
         style="padding: 20px"
     )
 
+NUM_PROMPTS = 4
+
+@rt("/gen_image", methods=["GET"])
+def gen_image():
+    prompt_inputs = [
+        Input(type="text", name=f"prompt-{i}", placeholder=f"Enter prompt {i+1}", style="width: 100%; margin-bottom: 10px;", value="cat")
+        for i in range(NUM_PROMPTS)
+    ]
+
+    return Div(
+        H1("Image Generation"),
+        H2("Enter Prompts:"),
+        Form(
+            *prompt_inputs,
+            Button("Generate Images", type="button", hx_post="/generate", hx_target="#image-results", hx_indicator="#loading"),
+            method="POST" # still needed to pass the data
+        ),
+        Div(id="loading", style="display:none;", children=[P("Generating...")]),
+        Div(id="image-results"),
+        style="padding: 20px;"
+    )
+
+@rt("/generate", methods=["POST"])
+def generate(form: dict):
+    prompts = [form.get(f"prompt-{i}", "") for i in range(NUM_PROMPTS)]
+    prompts = [p for p in prompts if p]
+    images = []
+    error_message = None
+
+    if not prompts:
+        return P("At least one prompt is required.", style="color: red;")
+
+    try:
+        response = requests.post("http://localhost:8000/sample", json={"prompts": prompts})
+        response.raise_for_status()
+        data = response.json()
+        images = data["images"]
+    except requests.exceptions.RequestException as e:
+        return P(f"Error generating images: {e}", style="color: red;")
+
+    image_elements = [
+        Img(src=f"data:image/png;base64,{img}", style="max-width: 300px; max-height: 300px; margin: 10px;")
+        for img in images
+    ]
+    return Div(*image_elements)
+
+
 @rt("/")
 def home():
     return Div(
         H1("fae"),
         H2("SAE"),
         P(A("Top features", href="/top_features")),
+        P(A("Generator", href="/gen_image")),
         style="padding: 5em"
     )
 

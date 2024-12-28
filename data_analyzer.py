@@ -1,4 +1,9 @@
 #%%
+import os
+os.environ["JAX_PLATFORMS"] = "cpu"
+from src.fae.quant_loading import restore_array
+sae_mid = restore_array(os.path.abspath("somewhere/sae_mid/2000/default"))
+#%%
 from glob import glob
 import numpy as np
 import matplotlib.pyplot as plt
@@ -108,6 +113,16 @@ plt.show()
 plt.plot(np.sort(image_double_data.var(axis=0))[::-1])
 plt.plot(np.sort(image_single_data.var(axis=0))[::-1])
 plt.plot(np.sort(text_data.var(axis=0))[::-1])
+plt.hlines([8192], 0, text_data.shape[1])
+
+plt.xscale("log")
+plt.yscale("log")
+plt.show()
+#%%
+plt.plot(np.sort(image_double_data.max(axis=0) - image_double_data.min(axis=0))[::-1])
+plt.plot(np.sort(image_single_data.max(axis=0) - image_single_data.min(axis=0))[::-1])
+plt.plot(np.sort(text_data.var(axis=0))[::-1])
+plt.hlines([8192], 0, text_data.shape[1])
 
 plt.xscale("log")
 plt.yscale("log")
