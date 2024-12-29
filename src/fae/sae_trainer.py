@@ -16,6 +16,7 @@ import optax
 import os
 import queue
 import jax.numpy as jnp
+from .hadamard import hadamard_matrix
 import equinox as eqx
 import wandb
 import math
@@ -83,12 +84,20 @@ class SAEOutput(eqx.Module):
 
 class SAEInfo(eqx.Module):
     config: SAEConfig = eqx.field(static=True)
-    n_steps: UInt[Array, ""]
+    
+    # Normalization/preprocessing
     avg_norm: Float[Array, ""]
     feature_means: Float[Array, "d_model"]  # Per-feature means
-    feature_square_means: Float[Array, "d_model"]  # Per-feature standard deviations
+    feature_square_means: Float[Array, "d_model"]  # Per-feature expected squared values
+    # hadamard instead of PCA
+    hadamard_matrix: Float[Array, "d_model d_model"]
+    
+    # Feature statistics
     feature_density: Float[Array, "n_features"]
     activated_in: UInt[Array, "batch_size n_features"]
+    
+    # Training statistics
+    n_steps: UInt[Array, ""]
     weight_norms: dict
     weight_grad_norms: dict
     grad_clip_percent: Float[Array, ""]
@@ -99,15 +108,19 @@ class SAEInfo(eqx.Module):
         return cls(
             config=config,
             n_steps=jnp.zeros(()),
+            
             avg_norm=jnp.ones(()),
             feature_means=jnp.zeros((config.d_model,)),
             feature_square_means=jnp.zeros((config.d_model,)),
+            hadamard_matrix=hadamard_matrix(config.d_model),
+
             feature_density=jnp.zeros((config.n_features,)),
             activated_in=jnp.zeros((config.n_features,), dtype=jnp.uint32),
+
             grad_clip_percent=jnp.zeros(()),
             grad_global_norm=jnp.zeros(()),
             weight_norms=dict(W_enc=jnp.linalg.norm(W_enc), W_dec=jnp.linalg.norm(W_enc.T)),
-            weight_grad_norms=dict(W_enc=jnp.zeros(()), W_dec=jnp.zeros(()))
+            weight_grad_norms=dict(W_enc=jnp.zeros(()), W_dec=jnp.zeros(())),
         )
 
     @property
@@ -118,23 +131,33 @@ class SAEInfo(eqx.Module):
     def feature_stds(self):
         return jnp.sqrt(jnp.maximum(self.feature_square_means - jnp.square(self.feature_means), 1e-6))
 
+    def preprocess(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
+        if self.config.use_hadamard:
+            return x @ self.hadamard_matrix / jnp.sqrt(self.config.d_model)
+
+    def deprocess(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
+        if self.config.use_hadamard:
+            return x @ self.hadamard_matrix.T * jnp.sqrt(self.config.d_model)
+
     def norm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
-        return (x - self.feature_means) / self.feature_stds
+        return (self.preprocess(x) - self.feature_means) / self.feature_stds
         # return x / self.avg_norm * self.tgt_norm
 
     def denorm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
-        return x * self.feature_stds + self.feature_means
+        return self.deprocess(x * self.feature_stds + self.feature_means)
         # return x / self.tgt_norm * self.avg_norm
 
     def step(self, sae: "SAE", updates: "SAE", grads: "SAE", outputs: SAEOutput):
         weighting_factor, new_weighting_factor = self.n_steps / (self.n_steps + 1), 1 / (self.n_steps + 1)
 
         if self.config.do_update:
-            new_avg_norm = jnp.mean(jnp.linalg.norm(outputs.x, axis=-1))
+            preprocessed_data = self.preprocess(outputs.x)
+            
+            new_avg_norm = jnp.mean(jnp.linalg.norm(preprocessed_data, axis=-1))
             updated_avg_norm = self.avg_norm * weighting_factor + new_avg_norm * new_weighting_factor
             
-            new_feature_means = jnp.mean(outputs.x, axis=0)  # Per-feature mean
-            new_feature_square_means = jnp.mean(jnp.square(outputs.x), axis=0)    # Per-feature std
+            new_feature_means = jnp.mean(preprocessed_data, axis=0)  # Per-feature mean
+            new_feature_square_means = jnp.mean(jnp.square(preprocessed_data), axis=0)    # Per-feature std
 
             updated_feature_means = self.feature_means * weighting_factor + new_feature_means * new_weighting_factor
             updated_feature_square_means = self.feature_square_means * weighting_factor + new_feature_square_means * new_weighting_factor
@@ -196,6 +219,7 @@ class SAEInfo(eqx.Module):
             avg_norm=P(),
             feature_means=P(None),
             feature_square_means=P(None),
+            hadamard_matrix=P(None, None),
             feature_density=P("tp"),
             activated_in=P("tp"),
             grad_clip_percent=P(),

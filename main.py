@@ -63,9 +63,9 @@ def top_features():
     # metric[maxima < 5] = np.inf
     # correct_order = np.argsort(metric)
     # matches = np.arange(len(scored_storage))[maxima > 3.5]
-    # cond = maxima > 3
+    cond = maxima > 3
     # cond = maxima > 2
-    cond = frequencies > 5e-5
+    # cond = frequencies > 5e-5
     # cond &= frequencies < 0.0031
     matches = np.arange(len(scored_storage))[cond]
     correct_order = np.random.permutation(matches)

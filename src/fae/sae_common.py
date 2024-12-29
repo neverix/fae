@@ -48,12 +48,13 @@ class SAEConfig:
 
     param_dtype: jax.typing.DTypeLike = jnp.float32
     bias_dtype: jax.typing.DTypeLike = jnp.float32
-    clip_data: Optional[float] = 16.0
+    clip_data: Optional[float] = 10.0
+    use_hadamard: bool = False
 
     k: int = 64
     aux_k: int = 64
-    aux_k_coeff: float = 1/64
-    # aux_k_coeff: float = 1/32
+    # aux_k_coeff: float = 1/64
+    aux_k_coeff: float = 1/32
     aux_k_variant: Literal["openai", "mine", "none"] = "mine"
     # aux_k_variant: Literal["openai", "mine", "none"] = "none"
     death_threshold_multiplier: float = 0.5
