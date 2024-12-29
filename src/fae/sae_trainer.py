@@ -283,8 +283,11 @@ class SAE(eqx.Module):
         aux_y_normed = sparse_matmul(dead_weights, dead_indices, self.W_dec)
         if self.config.aux_k_variant == "openai":
             aux_k_loss = jnp.mean(jnp.square((y_normed - x_normed) - aux_y_normed), axis=-1)
-        else:
+        elif self.config.aux_k_variant == "mine":
             aux_k_loss = jnp.mean(jnp.square(y_normed - (aux_y_normed + self.b_post)), axis=-1)
+        else:
+            logger.warning("Unknown aux_k_variant", self.config.aux_k_variant)
+            aux_k_loss = jnp.zeros_like(recon_loss)
         aux_k_loss = jnp.where(dead_condition.any(), aux_k_loss, 0)
 
         loss = recon_loss + self.config.aux_k_coeff * aux_k_loss

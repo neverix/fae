@@ -52,8 +52,10 @@ class SAEConfig:
 
     k: int = 64
     aux_k: int = 64
-    aux_k_coeff: float = 1/32
-    aux_k_variant: Literal["openai", "mine"] = "mine"
+    aux_k_coeff: float = 1/64
+    # aux_k_coeff: float = 1/32
+    aux_k_variant: Literal["openai", "mine", "none"] = "mine"
+    # aux_k_variant: Literal["openai", "mine", "none"] = "none"
     death_threshold_multiplier: float = 0.5
     _death_threshold: Optional[float] = 1.0
     inv_min_density: int = 1024
@@ -97,7 +99,7 @@ class SAEConfig:
 
     tp_size: int = jax.local_device_count()
 
-    learning_rate: float = 6e-4
+    learning_rate: float = 2e-4
     decay_lr: bool = False
     beta1: float = 0.0
     beta2: float = 0.99
