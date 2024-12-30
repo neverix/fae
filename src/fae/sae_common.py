@@ -94,8 +94,7 @@ class SAEConfig:
     seq_len: int = 512 + 256
     seq_mode: Literal["both", "txt", "img"] = "both"
     site: tuple[Literal["double", "single"], int] = ("double", 18)
-    # n_steps: int = 5_000
-    n_steps: int = 20_000
+    n_steps: int = 30_000
     wandb_name: Optional[tuple[str, str]] = ("neverix", "fae")
 
     tp_size: int = jax.local_device_count()
@@ -218,7 +217,7 @@ class SAEOutputSaver(object):
         self.feature_acts.insert_many(nums, indices, activations)
 
         rows, _scores, mask = self.feature_acts.all_rows()
-        used_rows = rows[:, :-2][mask].astype(np.uint64)
+        used_rows = rows[mask].astype(np.uint64)
         unique_idces = np.unique(used_rows[:, 0] * batch_size + used_rows[:, 1])
         unique_rows = np.stack((unique_idces // batch_size, unique_idces % batch_size), axis=1)
         extant_images = set(tuple(map(int, r)) for r in unique_rows)

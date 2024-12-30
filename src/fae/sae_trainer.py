@@ -134,10 +134,12 @@ class SAEInfo(eqx.Module):
     def preprocess(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
         if self.config.use_hadamard:
             return x @ self.hadamard_matrix / jnp.sqrt(self.config.d_model)
+        return x
 
     def deprocess(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
         if self.config.use_hadamard:
             return x @ self.hadamard_matrix.T * jnp.sqrt(self.config.d_model)
+        return x
 
     def norm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
         return (self.preprocess(x) - self.feature_means) / self.feature_stds
@@ -577,7 +579,7 @@ class SAEOverseer:
         return self.sae_trainer.mesh
 
 
-def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block_type = "double", layer = 18):
+def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block_type = "single", layer = 18):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
     prompts_iterator = prompts_dataset["train"]["caption_llava_short"]

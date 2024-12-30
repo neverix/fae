@@ -14,6 +14,8 @@ import shutil
 import requests
 from fh_plotly import plotly_headers, plotly2fasthtml
 import plotly.express as px
+import traceback
+import time
 
 CACHE_DIRECTORY = "somewhere/maxacts"
 HEIGHT, WIDTH = 16, 16
@@ -29,9 +31,11 @@ while True:
         scored_storage = ScoredStorage(
             cache_dir / "feature_acts.db",
             4, SAEConfig.top_k_activations,
-            mode="r"
+            mode="r", use_backup=True
         )
-    except (ValueError, EOFError):
+    except (ValueError, EOFError) as e:
+        traceback.print_exc()
+        time.sleep(0.01)
         continue
     break
 app, rt = fast_app(hdrs=plotly_headers)
@@ -63,7 +67,7 @@ def top_features():
     # metric[maxima < 5] = np.inf
     # correct_order = np.argsort(metric)
     # matches = np.arange(len(scored_storage))[maxima > 3.5]
-    cond = maxima > 3
+    cond = maxima > 4  # 4 for single/18, 3 for double/18
     # cond = maxima > 2
     # cond = frequencies > 5e-5
     # cond &= frequencies < 0.0031

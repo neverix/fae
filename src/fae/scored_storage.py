@@ -1,6 +1,8 @@
 from typing import List, Tuple, Any, Dict
 from pathlib import Path
 import numpy as np
+from loguru import logger
+import shutil
 import numba as nb
 import os
 
@@ -63,7 +65,7 @@ class ScoredStorage:
     def __init__(
         self,
         db_path: os.PathLike, num_params: int, max_rows_per_key: int,
-        mode: str = "w+"
+        mode: str = "w+", use_backup: bool = False
     ):
         self.db_path = db_path
         self.num_params = num_params
@@ -72,9 +74,16 @@ class ScoredStorage:
 
         unit_shape = (self.max_rows_per_key + 1, self.entry_len)
         if self.mode == "r":
+            logger.info(f"Opening database {db_path} for reading.")
             read_path = Path(db_path)
-            self.db = np.load(read_path.with_suffix(read_path.suffix + ".npy"))
+            read_path = read_path.with_suffix(read_path.suffix + ".npy")
+            if use_backup:
+                backup_path = read_path.with_suffix(read_path.suffix + ".bak")
+                if backup_path.exists():
+                    read_path = backup_path
+            self.db = np.load(read_path)
             assert self.db.shape[1:] == unit_shape, f"Expected shape {unit_shape}, got {self.db.shape[1:]}"
+            logger.info(f"Database {db_path} opened successfully.")
         else:
             n_records = 1
             self.db = np.zeros(
@@ -107,6 +116,10 @@ class ScoredStorage:
                 shape=new_size
             )
         _insert_many_jit(self.db, nums, indices, activations)
+        try:
+            shutil.move(self.db_path, self.db_path.with_suffix(self.db_path.suffix + ".bak"))
+        except FileNotFoundError:
+            pass
         np.save(self.db_path, self.db)
 
     def get_rows(self, key: int) -> List[Tuple[Tuple[Any, ...], float]]:
