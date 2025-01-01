@@ -107,6 +107,7 @@ class T5EncoderInferencer(object):
                 encoder_input = jnp.asarray(self.tokenizer.encode(text), dtype=jnp.int32)[
                     None
                 ]
+                encoder_input = encoder_input[:, :512]
                 encoder_input = jnp.pad(
                     encoder_input,
                     ((0, 0), (0, 512 - encoder_input.shape[-1])),

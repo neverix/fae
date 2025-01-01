@@ -170,12 +170,15 @@ for _ in range(7):
 plt.imshow(double_cov_subsampled)
 plt.colorbar()
 #%%
-double_pca_trans = np.linalg.eigh(double_cov)
+# double_pca_trans = np.linalg.eigh(double_cov)
+u, s, vt = np.linalg.svd(double_decentered)
 #%%
-double_v = double_pca_trans.eigenvectors
-double_s = double_pca_trans.eigenvalues ** 0.5
-double_pcaed = double_decentered @ double_v / double_s
-(np.mean(np.square(double_pcaed * double_s @ double_v.T - double_decentered)),
+# double_v = double_pca_trans.eigenvectors
+# double_s = double_pca_trans.eigenvalues ** 0.5
+double_v = vt.T
+double_s = s
+double_pcaed = double_decentered @ double_v
+(np.mean(np.square(double_pcaed @ double_v.T - double_decentered)),
 np.mean(np.square(double_decentered)), np.var(double_pcaed[:, 0]))
 #%%
 def amp(x, axis):
@@ -227,3 +230,4 @@ plt.plot(np.sort(amp(double_deanisotropized, axis=0))[::-1], label="pre-everythi
 plt.xscale("log")
 plt.yscale("log")
 plt.legend()
+# %%

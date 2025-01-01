@@ -89,8 +89,8 @@ class SAEInfo(eqx.Module):
     avg_norm: Float[Array, ""]
     feature_means: Float[Array, "d_model"]  # Per-feature means
     feature_square_means: Float[Array, "d_model"]  # Per-feature expected squared values
-    # hadamard instead of PCA
-    hadamard_matrix: Float[Array, "d_model d_model"]
+    # hadamard or PCA
+    whitening_matrix: Float[Array, "d_model d_model"]
     
     # Feature statistics
     feature_density: Float[Array, "n_features"]
@@ -112,7 +112,14 @@ class SAEInfo(eqx.Module):
             avg_norm=jnp.ones(()),
             feature_means=jnp.zeros((config.d_model,)),
             feature_square_means=jnp.zeros((config.d_model,)),
-            hadamard_matrix=hadamard_matrix(config.d_model),
+            whitening_matrix=(
+                None
+                if not config.use_whitening else (
+                    jnp.eye(config.d_model)
+                    if config.use_pca else
+                    hadamard_matrix(config.d_model) / jnp.sqrt(self.config.d_model)
+                )
+            ),
 
             feature_density=jnp.zeros((config.n_features,)),
             activated_in=jnp.zeros((config.n_features,), dtype=jnp.uint32),
@@ -132,13 +139,13 @@ class SAEInfo(eqx.Module):
         return jnp.sqrt(jnp.maximum(self.feature_square_means - jnp.square(self.feature_means), 1e-6))
 
     def preprocess(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
-        if self.config.use_hadamard:
-            return x @ self.hadamard_matrix / jnp.sqrt(self.config.d_model)
+        if self.config.use_whitening:
+            return x @ self.whitening_matrix
         return x
 
     def deprocess(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
-        if self.config.use_hadamard:
-            return x @ self.hadamard_matrix.T * jnp.sqrt(self.config.d_model)
+        if self.config.use_whitening:
+            return x @ self.whitening_matrix.T
         return x
 
     def norm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
@@ -150,6 +157,21 @@ class SAEInfo(eqx.Module):
         # return x / self.tgt_norm * self.avg_norm
 
     def step(self, sae: "SAE", updates: "SAE", grads: "SAE", outputs: SAEOutput):
+        # def compute_whitener():
+        #     x = outputs.x
+        #     x_dec = x - x.mean(axis=0, keepdims=True)
+        #     _u, _s, vt = jnp.linalg.svd(x_dec, full_matrices=True)
+        #     return vt
+        
+        # # ugly hack
+        # self = replace(
+        #     self,
+        #     whitening_matrix=jax.lax.cond(
+        #         self.n_steps == 0 & self.config.use_pca,
+        #         compute_whitener,
+        #         lambda: self.whitening_matrix,
+        #     ))
+        
         weighting_factor, new_weighting_factor = self.n_steps / (self.n_steps + 1), 1 / (self.n_steps + 1)
 
         if self.config.do_update:
@@ -221,7 +243,9 @@ class SAEInfo(eqx.Module):
             avg_norm=P(),
             feature_means=P(None),
             feature_square_means=P(None),
-            hadamard_matrix=P(None, None),
+            whitening_matrix=(
+                None if not config.use_whitening else P(None)
+            ),
             feature_density=P("tp"),
             activated_in=P("tp"),
             grad_clip_percent=P(),
@@ -579,7 +603,13 @@ class SAEOverseer:
         return self.sae_trainer.mesh
 
 
-def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block_type = "single", layer = 18):
+def compute_whitening(data: Float[Array, "batch_size d_model"]) -> Float[Array, "d_model d_model"]:
+    data = data - data.mean(axis=0, keepdims=True)
+    u, s, vt = jnp.linalg.svd(data, full_matrices=True)
+    return vt.astype(jnp.bfloat16).T
+
+
+def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block_type = "double", layer = 18):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
     prompts_iterator = prompts_dataset["train"]["caption_llava_short"]
@@ -596,10 +626,12 @@ def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block
     if not train_mode and not restore:
         logger.warning("Enabling restore")
         restore = True
+    save_dir = f"somewhere/sae_{block_type}_l{layer}_{seq_mode}"
     sae_trainer = SAEOverseer(
         config,
         save_every=None if not train_mode else 1000,
-        restore="somewhere/sae_mid" if restore else None,
+        restore=save_dir if restore else None,
+        save_at=save_dir
     )
     if not train_mode:
         saver = SAEOutputSaver(config, Path("somewhere/maxacts"))
@@ -638,10 +670,10 @@ def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block
         else:
             training_data = reaped[layer]
         training_data = config.cut_up(training_data)
-        if step < 25:
-            pardir = f"somewhere/{'t' if seq_mode == 'txt' else ('is' if block_type == 'single' else 'id')}d"
-            os.makedirs(pardir, exist_ok=True)
-            np.save(f"{pardir}/{step}.npy", training_data.astype(np.float32))
+        # if step < 25:
+        #     pardir = f"somewhere/{'t' if seq_mode == 'txt' else ('is' if block_type == 'single' else 'id')}d"
+        #     os.makedirs(pardir, exist_ok=True)
+        #     np.save(f"{pardir}/{step}.npy", training_data.astype(np.float32))
         activation_cache.append(np.asarray(training_data))
         if len(activation_cache) >= config.sae_train_every:
             assert config.sae_train_every % config.sae_batch_size_multiplier == 0
@@ -660,6 +692,12 @@ def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block
                 #     normalization_hack = 1 / training_data.std(axis=0)
                 # else:
                 #     training_data = training_data * normalization_hack
+                if int(sae_trainer.sae_trainer.sae_logic.info.n_steps) == 0 and config.use_pca:
+                    sae_trainer.sae_trainer = eqx.tree_at(
+                        lambda x: x.sae_logic.info.whitening_matrix,
+                        sae_trainer.sae_trainer,
+                        compute_whitening(training_data)
+                    )
                 sae_outputs = sae_trainer.step(
                     jax.device_put(
                         jnp.asarray(training_data),
@@ -677,8 +715,6 @@ def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block
                         )
                     )
                     saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
-
-    print("Waiting for saver to leave...")
 
 
 if __name__ == "__main__":

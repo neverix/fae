@@ -50,6 +50,11 @@ class SAEConfig:
     bias_dtype: jax.typing.DTypeLike = jnp.float32
     clip_data: Optional[float] = 10.0
     use_hadamard: bool = False
+    use_pca: bool = True
+    
+    @property
+    def use_whitening(self):
+        return self.use_pca or self.use_hadamard
 
     k: int = 64
     aux_k: int = 64
