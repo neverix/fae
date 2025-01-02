@@ -30,7 +30,7 @@ while True:
     try:
         scored_storage = ScoredStorage(
             cache_dir / "feature_acts.db",
-            4, SAEConfig.top_k_activations,
+            3, SAEConfig.top_k_activations,
             mode="r", use_backup=True
         )
     except (ValueError, EOFError) as e:
@@ -40,15 +40,14 @@ while True:
     break
 app, rt = fast_app(hdrs=plotly_headers)
 
-@rt("/cached_image/{step}/{image_id}")
-def cached_image(step: int, image_id: int):
-    img_path = image_cache_dir / f"{step}_{image_id}.jpg"
+@rt("/cached_image/{image_id}")
+def cached_image(image_id: int):
+    img_path = image_cache_dir / f"{image_id}.jpg"
     if not img_path.exists():
-        imgs_path = cache_dir / "images" / f"{step}.npz"
+        imgs_path = cache_dir / "images" / f"{image_id}.npz"
         if not imgs_path.exists():
             return {"error": "Image not found"}, 404
-        imgs = np.load(imgs_path)["arr_0"]
-        img = imgs[image_id:image_id+1]
+        img = np.load(imgs_path)["arr_0"][None]
         img = np.stack((img & 0x0F, (img & 0xF0) >> 4), -1).reshape(*img.shape[:-1], -1)
         img = nf4[img]
         img = img * SAEConfig.image_max
@@ -108,10 +107,10 @@ def fry_plot():
 def maxacts(feature_id: int):
     rows = scored_storage.get_rows(feature_id)
 
-    # Group rows by (step, idx)
+    # Group rows by idx
     grouped_rows = {}
-    for (step, idx, h, w), score in rows:
-        key = (step, idx)
+    for (idx, h, w), score in rows:
+        key = idx
         if key not in grouped_rows:
             grouped_rows[key] = np.zeros((HEIGHT, WIDTH), dtype=float)
 
@@ -120,8 +119,8 @@ def maxacts(feature_id: int):
 
     # Prepare images and cards
     imgs = []
-    for (step, idx), grid in sorted(grouped_rows.items(), key=lambda x: x[1].max(), reverse=True)[:20]:
-        full_activations = np.load(image_activations_dir / f"{step}_{idx}.npz")
+    for idx, grid in sorted(grouped_rows.items(), key=lambda x: x[1].max(), reverse=True)[:20]:
+        full_activations = np.load(image_activations_dir / f"{idx}.npz")
         gravel = grid.ravel()
         k = full_activations["arr_0"].shape[1]
         for i, (f, w) in enumerate(zip(full_activations["arr_0"].ravel(), full_activations["arr_1"].ravel())):
@@ -161,7 +160,7 @@ def maxacts(feature_id: int):
 
         # Create a container for overlaying the heatmap on the image
         overlaid_image = Div(
-            Img(src=f"/cached_image/{step}/{idx}", style="width: 100%; height: auto; position: relative;"),
+            Img(src=f"/cached_image/{idx}", style="width: 100%; height: auto; position: relative;"),
             heatmap_table,
             style="position: relative; width: 300px; height: 300px; overflow: hidden;"
         )
@@ -169,7 +168,7 @@ def maxacts(feature_id: int):
         # Add to images
         imgs.append(Card(
             Div(
-                P(f"Step: {step}, Index: {idx}, Score: {grid.max()}"),
+                P(f"Index: {idx}, Score: {grid.max()}"),
                 overlaid_image
             )
         ))
