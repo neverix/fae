@@ -173,7 +173,7 @@ class SAEConfig:
 
 
 class SAEOutputSaver(object):
-    def __init__(self, config: SAEConfig, save_dir: os.PathLike):
+    def __init__(self, config: SAEConfig, save_dir: os.PathLike, save_image_activations: bool = True):
         self.config = config
         save_dir = Path(save_dir).resolve()
         if save_dir.exists():
@@ -187,6 +187,7 @@ class SAEOutputSaver(object):
             save_dir / "feature_acts.db",
             3, config.top_k_activations
         )
+        self.save_image_activations = save_image_activations
 
     def save(
         self,
@@ -227,20 +228,21 @@ class SAEOutputSaver(object):
         unique_idces = np.unique(used_rows[:, 0])
         extant_images = set(unique_idces.tolist())
 
-        self.image_activations_dir.mkdir(parents=True, exist_ok=True)
-        for image in self.image_activations_dir.glob("*.npz"):
-            identifier = int(image.stem)
-            if identifier not in extant_images:
-                image.unlink()
-        for i in range(batch_size):
-            identifier = step * batch_size + i
-            if identifier not in extant_images:
-                continue
-            np.savez(
-                self.image_activations_dir / f"{identifier}.npz",
-                sae_indices_img[i],
-                sae_weights_img[i],
-            )
+        if self.save_image_activations:
+            self.image_activations_dir.mkdir(parents=True, exist_ok=True)
+            for image in self.image_activations_dir.glob("*.npz"):
+                identifier = int(image.stem)
+                if identifier not in extant_images:
+                    image.unlink()
+            for i in range(batch_size):
+                identifier = step * batch_size + i
+                if identifier not in extant_images:
+                    continue
+                np.savez(
+                    self.image_activations_dir / f"{identifier}.npz",
+                    sae_indices_img[i],
+                    sae_weights_img[i],
+                )
 
 
 @nb.jit

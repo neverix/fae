@@ -609,7 +609,9 @@ def compute_whitening(data: Float[Array, "batch_size d_model"]) -> Float[Array, 
     return vt.astype(jnp.bfloat16).T
 
 
-def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block_type = "double", layer = 18):
+def main(*, restore: bool = False,
+         seq_mode = "img", block_type = "double", layer = 18,
+         train_mode: bool = True, save_image_activations = True):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
     prompts_iterator = prompts_dataset["train"]["caption_llava_short"]
@@ -634,7 +636,7 @@ def main(train_mode: bool = True, restore: bool = False, seq_mode = "img", block
         save_at=save_dir
     )
     if not train_mode:
-        saver = SAEOutputSaver(config, Path("somewhere/maxacts"))
+        saver = SAEOutputSaver(config, Path("somewhere/maxacts"), save_image_activations=save_image_activations)
     width, height = config.width_and_height
     appeared_prompts = set()
     cycle_detected = False
