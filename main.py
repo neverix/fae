@@ -26,18 +26,19 @@ image_cache_dir = Path("somewhere/img_cache")
 if image_cache_dir.exists():
     shutil.rmtree(image_cache_dir)
 image_cache_dir.mkdir(parents=True, exist_ok=True)
-while True:
-    try:
-        scored_storage = ScoredStorage(
-            cache_dir / "feature_acts.db",
-            3, SAEConfig.top_k_activations,
-            mode="r", use_backup=True
-        )
-    except (ValueError, EOFError) as e:
-        traceback.print_exc()
-        time.sleep(0.01)
-        continue
-    break
+if os.path.exists(cache_dir / "feature_acts.db"):
+    while True:
+        try:
+            scored_storage = ScoredStorage(
+                cache_dir / "feature_acts.db",
+                3, SAEConfig.top_k_activations,
+                mode="r", use_backup=True
+            )
+        except (ValueError, EOFError) as e:
+            traceback.print_exc()
+            time.sleep(0.01)
+            continue
+        break
 app, rt = fast_app(hdrs=plotly_headers)
 
 @rt("/cached_image/{image_id}")
@@ -212,7 +213,7 @@ def generate(form: dict):
         return P("At least one prompt is required.", style="color: red;")
 
     try:
-        response = requests.post("http://localhost:8000/sample", json={"prompts": prompts})
+        response = requests.post("http://localhost:8000/sample", json={"prompts": prompts, "sample_steps": 20})
         response.raise_for_status()
         data = response.json()
         images = data["images"]

@@ -3,8 +3,6 @@ from pydantic import BaseModel
 from typing import List
 import base64
 import io
-from PIL import Image
-import numpy as np
 from .ensemble import (
     FluxEnsemble,
 )
@@ -12,7 +10,7 @@ import uvicorn
 
 app = FastAPI()
 
-ensemble = FluxEnsemble()
+ensemble = FluxEnsemble(use_schnell=False)
 
 
 class SampleRequest(BaseModel):

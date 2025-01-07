@@ -611,7 +611,8 @@ def compute_whitening(data: Float[Array, "batch_size d_model"]) -> Float[Array, 
 
 def main(*, restore: bool = False,
          seq_mode = "img", block_type = "double", layer = 18,
-         train_mode: bool = True, save_image_activations = True):
+         train_mode: bool = True, save_image_activations = True,
+         **extra_config_items,):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
     prompts_iterator = prompts_dataset["train"]["caption_llava_short"]
@@ -624,6 +625,7 @@ def main(*, restore: bool = False,
         **(dict(sae_train_every=1,
         sae_batch_size_multiplier=1)
         if not train_mode else {}),
+        **extra_config_items,
     )
     if not train_mode and not restore:
         logger.warning("Enabling restore")

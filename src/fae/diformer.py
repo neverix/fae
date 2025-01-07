@@ -509,6 +509,7 @@ def load_flux(
 ):
     logger.info(f"Loading flux from {path or hf_path}")
     preprocess_into = Path(preprocess_into).resolve() if preprocess_into else None
+    preprocess_into = preprocess_into / "--".join(hf_path[0].split("/")) if preprocess_into else None
     if preprocess_into is None or not preprocess_into.exists():
         if path is not None:
             flux = load_file(path)
@@ -520,6 +521,7 @@ def load_flux(
             flux = preprocess_official(flux, model)
         if preprocess_into is not None:
             logger.info("Saving preprocessed flux")
+            preprocess_into.mkdir(parents=True, exist_ok=True)
             save_thing(flux, preprocess_into)
         else:
             logger.info("Skipping save")
