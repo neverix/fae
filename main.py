@@ -3,7 +3,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 from fasthtml.common import fast_app, serve
 from fasthtml.common import FileResponse, JSONResponse
 from fasthtml.common import (
-    Img, Div, Card, P, Table, Tbody, Tr, Td, A, H1, H2,
+    Img, Div, Card, P, Table, Tbody, Tr, Td, A, H1, H2, Br,
     Form, Button, Input)
 from src.fae.vae import FluxVAE
 from src.fae.sae_common import SAEConfig, nf4
@@ -26,7 +26,7 @@ image_cache_dir = Path("somewhere/img_cache")
 if image_cache_dir.exists():
     shutil.rmtree(image_cache_dir)
 image_cache_dir.mkdir(parents=True, exist_ok=True)
-if os.path.exists(cache_dir / "feature_acts.db"):
+if os.path.exists(cache_dir / "feature_acts.db") or True:
     while True:
         try:
             scored_storage = ScoredStorage(
@@ -76,12 +76,27 @@ def top_features():
     top_few = correct_order[:256].tolist()
     return Div(
         H1(f"Top features ({len(matches)}/{len(matches) / len(scored_storage) * 100:.2f}% match criteria)"),
+        Br(),
+        H1(f"Spatial sparsity: {spatial_sparsity():.3f}"),
+        Br(),
         *[Card(
             P(f"Feature {i}, Frequency: {frequencies[i]:.5f}, Max: {maxima[i]}"),
             A("View Max Acts", href=f"/maxacts/{i}")
         ) for i in top_few],
         style="display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; padding: 20px;"
     )
+
+@rt("/spatial_sparsity")
+def spatial_sparsity():
+    non_sparse_features = np.zeros(len(scored_storage), dtype=bool)
+    img_list = list(image_activations_dir.glob("*.npz"))
+    for img in img_list:
+        saved = np.load(img)
+        ind, wei = saved["arr_0"].ravel(), saved["arr_1"].ravel()
+        feature_counts = np.bincount(ind[wei > 0.0], minlength=len(scored_storage))
+        non_sparse_features |= feature_counts > 6
+    return non_sparse_features.mean()
+
 
 @rt("/feature_counts")
 def feature_counts():
