@@ -116,10 +116,11 @@ class ScoredStorage:
                 shape=new_size
             )
         _insert_many_jit(self.db, nums, indices, activations)
-        try:
-            shutil.move(self.db_path, self.db_path.with_suffix(self.db_path.suffix + ".bak"))
-        except FileNotFoundError:
-            pass
+        db_path_npy = Path(self.db_path).with_suffix(self.db_path.suffix + ".npy")
+        if db_path_npy.exists():
+            shutil.move(
+                db_path_npy, db_path_npy.with_suffix(db_path_npy.suffix + ".bak")
+            )
         np.save(self.db_path, self.db)
 
     def get_rows(self, key: int) -> List[Tuple[Tuple[Any, ...], float]]:

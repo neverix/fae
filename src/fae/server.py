@@ -6,6 +6,7 @@ import io
 from .ensemble import (
     FluxEnsemble,
 )
+from .interp_globals import post_double_stream, post_single_stream
 import uvicorn
 
 app = FastAPI()
@@ -18,6 +19,9 @@ class SampleRequest(BaseModel):
     width: int = 512
     height: int = 512
     sample_steps: int = 3
+    capture_double_layers: List[int] = []
+    capture_single_layers: List[int] = []
+    capture_timesteps: List[int] = []
 
 
 @app.post("/sample")
@@ -27,21 +31,25 @@ async def generate_images(request: SampleRequest):
 
     images = []
 
-    for i, img in enumerate(
-        ensemble.sample(
-            request.prompts,
-            width=request.width,
-            height=request.height,
-            sample_steps=request.sample_steps,
-        )
-    ):
-        # Convert the generated PIL image to bytes for response
-        img_bytes = io.BytesIO()
-        img.save(img_bytes, format="PNG")
-        img_base64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
-        images.append(img_base64)
+    with post_single_stream.capture(*request.capture_single_layers) as reaped_single, post_double_stream.capture(
+        *request.capture_double_layers) as reaped_double:
+        for i, img in enumerate(
+            ensemble.sample(
+                request.prompts,
+                width=request.width,
+                height=request.height,
+                sample_steps=request.sample_steps,
+            )
+        ):
+            # Convert the generated PIL image to bytes for response
+            img_bytes = io.BytesIO()
+            img.save(img_bytes, format="PNG")
+            img_base64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
+            images.append(img_base64)
 
-    return {"images": images}
+    return {"images": images,
+            "debug_double": {k: {k2: v2.tolist() for k2, v2 in v.items()} for k, v in reaped_double.items()},
+            "debug_single": {k: v.tolist() for k, v in reaped_single.items()}}
 
 
 # Run the app if this file is executed directly

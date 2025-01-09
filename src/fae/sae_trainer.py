@@ -149,12 +149,14 @@ class SAEInfo(eqx.Module):
         return x
 
     def norm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
-        return (self.preprocess(x) - self.feature_means) / self.feature_stds
-        # return x / self.avg_norm * self.tgt_norm
+        if self.config.standardize:
+            return (self.preprocess(x) - self.feature_means) / self.feature_stds
+        return x / self.avg_norm * self.tgt_norm
 
     def denorm(self, x: Float[Array, "batch_size d_model"]) -> Float[Array, "batch_size d_model"]:
-        return self.deprocess(x * self.feature_stds + self.feature_means)
-        # return x / self.tgt_norm * self.avg_norm
+        if self.config.standardize:
+            return self.deprocess(x * self.feature_stds + self.feature_means)
+        return x / self.tgt_norm * self.avg_norm
 
     def step(self, sae: "SAE", updates: "SAE", grads: "SAE", outputs: SAEOutput):
         # def compute_whitener():
@@ -674,10 +676,6 @@ def main(*, restore: bool = False,
         else:
             training_data = reaped[layer]
         training_data = config.cut_up(training_data)
-        # if step < 25:
-        #     pardir = f"somewhere/{'t' if seq_mode == 'txt' else ('is' if block_type == 'single' else 'id')}d"
-        #     os.makedirs(pardir, exist_ok=True)
-        #     np.save(f"{pardir}/{step}.npy", training_data.astype(np.float32))
         activation_cache.append(np.asarray(training_data))
         if len(activation_cache) >= config.sae_train_every:
             assert config.sae_train_every % config.sae_batch_size_multiplier == 0

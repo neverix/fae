@@ -95,7 +95,7 @@ def spatial_sparsity():
         ind, wei = saved["arr_0"].ravel(), saved["arr_1"].ravel()
         feature_counts = np.bincount(ind[wei > 0.0], minlength=len(scored_storage))
         non_sparse_features |= feature_counts > 6
-    return non_sparse_features.mean()
+    return 1 - non_sparse_features.mean()
 
 
 @rt("/feature_counts")

@@ -49,6 +49,7 @@ class SAEConfig:
     param_dtype: jax.typing.DTypeLike = jnp.float32
     bias_dtype: jax.typing.DTypeLike = jnp.float32
     clip_data: Optional[float] = 10.0
+    standardize: bool = True
     use_hadamard: bool = False
     use_pca: bool = True
     
