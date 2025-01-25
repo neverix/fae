@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float
-from .quant import QuantMatrix
+from .quant import MockQuantMatrix
 import fire
 from einops import rearrange
 from loguru import logger
@@ -178,7 +178,7 @@ class FluxInferencer(eqx.Module):
         def to_mesh(arr):
             if not is_arr(arr):
                 return arr
-            if isinstance(arr, QuantMatrix):
+            if isinstance(arr, MockQuantMatrix):
                 return arr.with_mesh_and_axis(mesh_and_axis)
             return jax.device_put(
                 arr,
@@ -204,10 +204,10 @@ class FluxInferencer(eqx.Module):
             guidance=guidance_scale,
         )
         # TODO fix this
-        if "MockQuantMatrix" in str(self.model):
-            patched = call_plain(self.model, **kwargs)
-        else:
-            patched = call(self.model, **kwargs)
+        # if "MockQuantMatrix" in str(self.model):
+        patched = call_plain(self.model, **kwargs)
+        # else:
+            # patched = call(self.model, **kwargs)
         return ImageOutput(previous_input=image_inputs, patched=patched)
 
     def to_mesh(self, x, already_sharded=False):

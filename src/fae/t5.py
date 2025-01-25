@@ -6,11 +6,12 @@ import jax.numpy as jnp
 import equinox as eqx
 from pathlib import Path
 from .quant_loading import load_thing, save_thing
+import dataclasses
 import numpy as np
 import jax
 import qax
 
-from .quant import quantize_matrix, QuantMatrix
+from .quant import quantize_matrix, QuantMatrix, is_arr
 
 jit_quantize = jax.jit(quantize_matrix, static_argnames=("use_approx", "group_size"))
 
@@ -42,7 +43,7 @@ def to_device_params_tree(params, **kwargs):
     return jax.tree.map(
         partial(to_device, **kwargs),
         params,
-        is_leaf=lambda x: isinstance(x, qax.primitives.ArrayValue),
+        is_leaf=is_arr,
     )
 
 @partial(jax.jit, static_argnums=(0,))
@@ -87,11 +88,13 @@ class T5EncoderInferencer(object):
         def set_use_kernel(tree, value):
             def op(x):
                 if isinstance(x, QuantMatrix):
-                    x.use_kernel = value
+                    # x.use_kernel = value
+                    return dataclasses.replace(x, use_kernel=value)
+                return x
 
-            jax.tree.map(op, tree, is_leaf=lambda x: isinstance(x, QuantMatrix))
+            return jax.tree.map(op, tree, is_leaf=lambda x: isinstance(x, QuantMatrix))
 
-        set_use_kernel(params, True)
+        params = set_use_kernel(params, True)
 
         self.wrapped_model = eqx.filter_jit(qax.use_implicit_args(model.__call__))
         self.params = params

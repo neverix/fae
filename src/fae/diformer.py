@@ -10,7 +10,7 @@ from collections import defaultdict
 from huggingface_hub import hf_hub_download
 from jaxtyping import Array, Float, UInt
 from typing import Optional
-from .quant import QuantMatrix, MockQuantMatrix
+from .quant import MockQuantMatrix, is_arr
 from .quant_loading import load_thing, save_thing
 import qax.primitives
 import qax
@@ -25,15 +25,10 @@ from .diflayers import (
 from .dumb_rng import dumb_prng_impl
 
 
-
-def is_arr(x):
-    return isinstance(x, qax.primitives.ArrayValue)
-
-
 def unify(arg, *args, repeat=None):
     if not is_arr(arg):
         return arg
-    if isinstance(arg, QuantMatrix):
+    if isinstance(arg, MockQuantMatrix):
         if repeat is not None:
             args = (arg,) * (repeat - 1)
         return arg.stack(*args)
@@ -239,7 +234,7 @@ def selector_fn(name):
 
 @partial(jax.jit, static_argnames=("axis", "start", "size"))
 def weight_slice(arr, *, axis: int, start: int, size: int):
-    if isinstance(arr, QuantMatrix):
+    if isinstance(arr, MockQuantMatrix):
         return arr.slice(axis=axis, start=start, size=size)
     return jax.lax.dynamic_slice_in_dim(arr, start, size, axis=axis)
 
@@ -327,7 +322,7 @@ def preprocess_weights(flux, model):
         assert (quants.shape[-3] * quants.shape[-2]) == og_shape[
             -2
         ], f"{key}: {quants.shape} != {og_shape}"
-        quant = QuantMatrix(
+        quant = MockQuantMatrix(
             shape=og_shape,
             dtype=og_dtype,
             quants=quants,
@@ -449,7 +444,7 @@ def preprocess_official(flux, model):
         if any(s in key for s in ("vector_in", "guidance_in")):
             array_flux[key] = x
             continue
-        x = QuantMatrix.quantize(x, mode="nf4", group_size=64)
+        x = MockQuantMatrix.quantize(x, mode="nf4", group_size=64)
         array_flux[key] = x
     flux = array_flux
 
@@ -535,7 +530,7 @@ def load_flux(
         def replace_fn(old):
             v = value
             if isinstance(v, dict):
-                v = QuantMatrix(
+                v = MockQuantMatrix(
                     **v,
                     orig_dtype=jnp.bfloat16,
                     use_approx=True,
@@ -543,7 +538,7 @@ def load_flux(
                     mesh_and_axis=None,
                 )
             assert old.shape == v.shape, f"{key}: {old.shape} != {v.shape}"
-            if not isinstance(v, QuantMatrix):
+            if not isinstance(v, MockQuantMatrix):
                 v = v.astype(old.dtype)
             return v
         try:

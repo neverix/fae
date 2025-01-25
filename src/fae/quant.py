@@ -1,6 +1,6 @@
 from typing import Optional, Tuple, Sequence, List
 import jax
-from equinox import Module
+import equinox as eqx
 from dataclasses import dataclass
 import dataclasses
 import jax.experimental
@@ -702,19 +702,16 @@ def dot_general_handler(
 
 qax.primitive_handler("dot_general")(dot_general_handler)
 
-def is_arr(x):
-    return isinstance(x, qax.primitives.ArrayValue)
 
-
-class MockQuantMatrix(Module):
+class MockQuantMatrix(eqx.Module):
     quants: jnp.ndarray
     scales: jnp.ndarray
 
-    use_approx: bool = qax.aux_field()
-    use_kernel: bool = qax.aux_field()
-    orig_dtype: jnp.dtype = qax.aux_field()
+    use_approx: bool = eqx.field(static=True)
+    use_kernel: bool = eqx.field(static=True)
+    orig_dtype: jnp.dtype = eqx.field(static=True)
 
-    mesh_and_axis: Optional[Tuple[jax.sharding.Mesh, Optional[int]]] = qax.aux_field()
+    mesh_and_axis: Optional[Tuple[jax.sharding.Mesh, Optional[int]]] = eqx.field(static=True)
 
     def __repr__(self):
         return f"MockQuantMatrix(quants={self.quants.shape}, scales={self.scales.shape}, use_approx={self.use_approx}, use_kernel={self.use_kernel}, orig_dtype={self.orig_dtype}, mesh_and_axis=something)"
@@ -745,6 +742,68 @@ class MockQuantMatrix(Module):
     @property
     def dtype(self):
         return self.orig_dtype
+
+    @staticmethod
+    def quantize(mat, mode="nf4", **kwargs):
+        quants, scales = quantize_vmap(mat, mode, **kwargs)
+        return MockQuantMatrix(
+            quants=quants,
+            scales=scales,
+            use_approx=True,
+            orig_dtype=mat.dtype,
+            use_kernel=True,
+            mesh_and_axis=None,
+        )
+
+    def slice(self, *, axis: int, start: int, size: int):
+        if axis == self.quants.ndim - 3:
+            start //= self.block_size
+            size //= self.block_size
+        return dataclasses.replace(
+            self,
+            quants=jax.lax.dynamic_slice_in_dim(self.quants, start, size, axis),
+            scales=jax.lax.dynamic_slice_in_dim(self.scales, start, size, axis),
+        )
+
+    def stack(self, *quants):
+        return dataclasses.replace(
+            self,
+            quants=jnp.stack((self.quants,) + tuple(x.quants for x in quants), axis=0),
+            scales=jnp.stack((self.scales,) + tuple(x.scales for x in quants), axis=0),
+        )
+    
+    @property
+    def ndim(self):
+        return self.quants.ndim - 1
+
+    def with_mesh_and_axis(self, mesh_and_axis):
+        batch_dims = (None,) * (self.quants.ndim - 3)
+        new_quant_matrix = dataclasses.replace(self, mesh_and_axis=mesh_and_axis)
+        mesh, shard_axis = mesh_and_axis
+        if shard_axis == 0:
+            quant_sharding = jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(*batch_dims, "tp", None, None)
+            )
+        elif shard_axis == 1:
+            quant_sharding = jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(*batch_dims, None, None, "tp")
+            )
+        elif shard_axis is None:
+            quant_sharding = jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(*batch_dims, None, None, "fsdp")
+            )
+        # new_quant_matrix = jax.device_put(
+        #     new_quant_matrix,
+        #     MockQuantMatrix(quants=quant_sharding, scales=quant_sharding))
+        new_quant_matrix = dataclasses.replace(
+            new_quant_matrix,
+            quants=jax.device_put(new_quant_matrix.quants, quant_sharding),
+            scales=jax.device_put(new_quant_matrix.scales, quant_sharding),
+        )
+        return new_quant_matrix
+
+def is_arr(x):
+    return isinstance(x, (MockQuantMatrix, qax.primitives.ArrayValue))
 
 # # https://github.com/jax-ml/jax/blob/main/jax/experimental/jet.py
 # def process_custom_vjp_call(self, primitive, fun, fwd, bwd, tracers, out_trees, *args, **kwargs):

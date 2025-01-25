@@ -6,7 +6,7 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from .vae import FluxVAE
 from .quant import kernel_mode
-from .quant import MockQuantMatrix, QuantMatrix, is_arr
+from .quant import MockQuantMatrix, is_arr
 import jax.numpy as jnp
 from src.fae.ensemble import FluxEnsemble
 from src.fae.diflayers import VLinear

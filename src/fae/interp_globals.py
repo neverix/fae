@@ -4,8 +4,55 @@ from contextlib import contextmanager
 from functools import partial
 import jax.experimental
 from copy import copy
+from oryx.core.interpreters.harvest import call_and_reap, sow
 import jax
 
+
+REAP_MAX_N = 128
+
+
+def named_sow(x, key):
+    return sow(x, tag="interp", name=key)
+
+
+def cond_sower(index, sower, key="", max_n=REAP_MAX_N):
+    return lambda x: jax.lax.switch(
+        index,
+        [partial(sower, key=key + f".{i}")
+         for i in range(max_n)], x
+    )
+
+
+class Reaper(object):
+    def __init__(self, base_key, max_n: int = REAP_MAX_N):
+        self.base_key = base_key
+        self.max_n = max_n
+    
+    def sow(self, index, x):
+        return cond_sower(index, named_sow, self.base_key)(x)
+
+    def reap(self, fn, no_reaped=False):
+        def fn_args_kwargs(args_kwargs):
+            result = fn(*args_kwargs[0], **args_kwargs[1])
+            if no_reaped:
+                return result, {}
+            return result
+        def new_fn(*args, **kwargs):
+            (results, base_reaped), reaped = call_and_reap(
+                fn_args_kwargs,
+                (args, kwargs),
+                tag="interp",
+                allowlist=[
+                    self.base_key + f".{i}"
+                    for i in range(self.max_n)
+                ])
+            reaped = {k.lstrip(self.base_key + "."): v for k, v in reaped.items()}
+            return results, base_reaped | {self.base_key: reaped}
+        return new_fn
+
+
+post_double_reaper = Reaper("double.resid")
+post_single_reaper = Reaper("single.resid")
 
 class InterpHelper(object):
     def __init__(self, name):

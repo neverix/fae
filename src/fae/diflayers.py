@@ -12,7 +12,11 @@ from jaxtyping import Array, Bool, Float
 import equinox as eqx
 from equinox import nn
 from functools import partial
-from .interp_globals import post_double_stream, post_single_stream
+from .interp_globals import (
+    post_double_stream, post_single_stream,
+    post_double_reaper, post_single_reaper
+)
+from oryx.core.interpreters.harvest import sow
 import qax
 from .quant import MockQuantMatrix, dot_general_handler
 
@@ -540,6 +544,7 @@ class DoubleStreamBlock(eqx.Module):
 
         result = dict(img=fr(img), txt=fr(txt))
         post_double_stream.jax_callback(layer_idx, result)
+        post_double_reaper.sow(layer_idx, result)
         return result
 
 
