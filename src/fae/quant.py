@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Sequence, List
+from typing import Optional, Tuple
 import jax
 import equinox as eqx
 from dataclasses import dataclass
@@ -8,8 +8,6 @@ import jax.experimental.shard_map
 import jax.numpy as jnp
 import numpy as np
 from math import ceil
-from concurrent import futures
-import orbax.checkpoint as ocp
 from functools import partial
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu

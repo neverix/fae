@@ -1,4 +1,3 @@
-from collections import defaultdict
 from fire import Fire
 import numpy as np
 from jax.experimental import mesh_utils
@@ -6,15 +5,13 @@ from jax.sharding import PartitionSpec as P
 from datasets import load_dataset
 from more_itertools import chunked
 from .ensemble import FluxEnsemble
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import partial
 from jaxtyping import Float, Array, UInt
 from loguru import logger
 from tqdm.auto import tqdm
 from optax._src.linear_algebra import global_norm
 import optax
-import os
-import queue
 import jax.numpy as jnp
 from .hadamard import hadamard_matrix
 import equinox as eqx
@@ -30,7 +27,6 @@ from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from .sae_common import SAEConfig, SAEOutputSaver
 from .interp_globals import post_double_stream, post_single_stream
-import threading
 
 
 class SAEConfigHandler(ocp.type_handlers.TypeHandler):

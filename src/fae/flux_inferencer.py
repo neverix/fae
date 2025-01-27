@@ -1,7 +1,6 @@
 import random
 from dataclasses import asdict
 from typing import Optional, Dict
-from functools import partial
 import torch
 import jax
 import jax.numpy as jnp
@@ -14,7 +13,6 @@ from loguru import logger
 from .diformer import DiFormer, is_arr
 import equinox as eqx
 from .diflayers import global_mesh
-import qax
 from typing import Union
 from jax.experimental import mesh_utils
 import ml_dtypes

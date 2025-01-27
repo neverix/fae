@@ -12,15 +12,13 @@ from jaxtyping import Array, Float, UInt
 from typing import Optional
 from .quant import MockQuantMatrix, is_arr
 from .quant_loading import load_thing, save_thing
-import qax.primitives
-import qax
 import jax.numpy as jnp
 import jax
 from pathlib import Path
 from loguru import logger
 from typing import TypeVar, Generic
 from .diflayers import (
-    SingleStreamBlock, DoubleStreamBlock, LastLayer, timestep_embedding, EmbedND, MLPEmbedder,
+    SingleStreamBlock, DoubleStreamBlock, LastLayer, EmbedND, MLPEmbedder,
     VLinear, DiFormerConfig, timestep_embedding)
 from .dumb_rng import dumb_prng_impl
 

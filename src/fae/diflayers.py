@@ -11,13 +11,9 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Bool, Float
 import equinox as eqx
 from equinox import nn
-from functools import partial
 from .interp_globals import (
-    post_double_stream, post_single_stream,
     post_double_reaper, post_single_reaper
 )
-from oryx.core.interpreters.harvest import sow
-import qax
 from .quant import MockQuantMatrix, dot_general_handler
 
 

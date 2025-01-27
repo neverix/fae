@@ -34,7 +34,7 @@ if os.path.exists(cache_dir / "feature_acts.db") or True:
                 3, SAEConfig.top_k_activations,
                 mode="r", use_backup=True
             )
-        except (ValueError, EOFError) as e:
+        except (ValueError, EOFError):
             traceback.print_exc()
             time.sleep(0.01)
             continue
@@ -160,7 +160,7 @@ def maxacts(feature_id: int):
 
                 # Create cell with background color and score
                 # cell_content = f"{score:.2f}"
-                cell_content = f""
+                cell_content = ""
                 td_cell = Td(cell_content,
                              style=f"background-color: {color}; text-align: center; padding: 1px; color: white; font-size: 1px;")
                 td_cells.append(td_cell)

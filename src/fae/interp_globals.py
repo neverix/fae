@@ -1,8 +1,7 @@
 from contextlib import contextmanager
-from functools import partial
 import jax.experimental
 from copy import copy
-from oryx.core.interpreters.harvest import call_and_reap, sow_cond, sow, plant
+from oryx.core.interpreters.harvest import call_and_reap, sow_cond
 import jax.numpy as jnp
 import jax
 
