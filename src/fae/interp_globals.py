@@ -11,22 +11,43 @@ import jax
 class Reaper(object):
     def __init__(self, base_key):
         self.base_key = base_key
-        self.buffer_size = None
+        self.restrict_to_layers = []
+        
+    @property
+    def buffer_size(self):
+        return len(self.restrict_to_layers)
     
-    def sow(self, index, x):
+    def sow(self, index, x, key=""):
         if self.buffer_size is None or self.buffer_size <= 0:
             return x
         if not isinstance(x, jax.typing.ArrayLike):
-            return jax.tree.map(partial(self.sow, index), x)
-        allowed_indices = sow(jnp.full(self.buffer_size, -1, dtype=jnp.int32), tag=self.tag, name="allowed_indices", mode="clobber")
-        prev_clobbered = sow_cond(jnp.empty((self.buffer_size,) + x.shape, dtype=x.dtype), jnp.zeros((), dtype=jnp.bool_), tag=self.tag, name=self.base_key)
+            if isinstance(x, dict):
+                return {k: self.sow(index, v, key + f".{k}") for k, v in x.items()}
+            else:
+                raise ValueError(f"Cannot sow {type(x)}")
+        prev_clobbered = sow_cond(jnp.empty((self.buffer_size,) + x.shape, dtype=x.dtype), jnp.zeros((), dtype=jnp.bool_), tag=self.tag, name=self.base_key + key)
+        allowed_indices = jnp.array(self.restrict_to_layers, dtype=jnp.int32)
         new_clobbered = prev_clobbered.at[jnp.argmax(allowed_indices == index)].set(x)
-        sow_cond(new_clobbered, jnp.isin(index, allowed_indices), tag=self.tag, name=self.base_key, mode="cond_clobber")
+        sow_cond(new_clobbered, jnp.isin(index, allowed_indices), tag=self.tag, name=self.base_key + key, mode="cond_clobber")
+        # jax.debug.print(
+        #     "{} {} {} {}",
+        #     index,
+        #     allowed_indices,
+        #     jnp.argmax(allowed_indices == index),
+        #     jnp.isin(allowed_indices, index),
+        # )
         return x
     
     @property
     def tag(self):
         return self.base_key + ".interp"
+
+    @contextmanager
+    def reaping(self, *layers):
+        prev_restrict_to_layers = self.restrict_to_layers
+        self.restrict_to_layers = layers
+        yield self
+        self.restrict_to_layers = prev_restrict_to_layers
 
     def reap(self, fn, no_reaped=False, restrict_to_layers=[]):
         def fn_args_kwargs(args_kwargs):
@@ -35,17 +56,12 @@ class Reaper(object):
                 return result, {}
             return result
         def new_fn(*args, **kwargs):
-            prev_buffer_size = self.buffer_size
-            self.buffer_size = len(restrict_to_layers)
-            allowed_indices = jnp.array(restrict_to_layers, dtype=jnp.int32)
-            (results, base_reaped), reaped = call_and_reap(
-                plant(fn_args_kwargs, tag=self.tag),
-                tag=self.tag,
-                allowlist=[self.base_key])(
-                    {"allowed_indices": allowed_indices},
-                    (args, kwargs)
-                )
-            self.buffer_size = prev_buffer_size
+            with self.reaping(*restrict_to_layers):
+                (results, base_reaped), reaped = call_and_reap(
+                    fn_args_kwargs,
+                    tag=self.tag)(
+                        (args, kwargs)
+                    )
             return results, base_reaped | reaped
         return new_fn
 

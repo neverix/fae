@@ -544,7 +544,7 @@ class DoubleStreamBlock(eqx.Module):
 
         result = dict(img=fr(img), txt=fr(txt))
         # post_double_stream.jax_callback(layer_idx, result)
-        post_double_reaper.sow(layer_idx, result)
+        result = post_double_reaper.sow(layer_idx, result)
         return result
 
 
@@ -590,6 +590,6 @@ class SingleStreamBlock(eqx.Module):
         out = fr(out)
         
         # post_single_stream.jax_callback(layer_idx, out)        
-        post_single_reaper.sow(layer_idx, out)
+        out = post_single_reaper.sow(layer_idx, out)
 
         return out

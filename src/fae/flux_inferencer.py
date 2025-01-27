@@ -139,7 +139,8 @@ class ImageOutput(DotDict):
         return jnp.mean(jnp.square(self.ground_truth - self.prediction))  # simple as that
 
 
-call_plain = eqx.filter_jit(lambda arg, **kwargs: arg(**kwargs))
+call_simple = lambda arg, **kwargs: arg(**kwargs)
+call_plain = eqx.filter_jit(call_simple)
 
 
 class FluxInferencer(eqx.Module):
@@ -213,10 +214,10 @@ class FluxInferencer(eqx.Module):
         )
         patched, reaped = eqx.filter_jit(post_single_reaper.reap(
             post_double_reaper.reap(
-                self.model,
+                call_simple,
                 restrict_to_layers=reap_double,
                 no_reaped=True,),
-            restrict_to_layers=reap_single))(**kwargs)
+            restrict_to_layers=reap_single))(self.model, **kwargs)
         return ImageOutput(previous_input=image_inputs, patched=patched, reaped=reaped)
 
     def to_mesh(self, x, already_sharded=False):
