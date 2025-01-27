@@ -1,5 +1,6 @@
 import random
 from dataclasses import asdict
+from typing import Optional, Dict
 from functools import partial
 import torch
 import jax
@@ -18,6 +19,7 @@ from typing import Union
 from jax.experimental import mesh_utils
 import ml_dtypes
 from .vae import FluxVAE, FluxVAEHQ
+from .interp_globals import post_double_reaper, post_single_reaper
 
 
 def random_or(key):
@@ -93,6 +95,7 @@ class ImageInput(DotDict):
 class ImageOutput(DotDict):
     previous_input: ImageInput
     patched: Float[Array, "*batch n_seq (patch_size patch_size in_channels)"]
+    reaped: Dict[str, Optional[jax.typing.ArrayLike]]
 
     @property
     def prediction(self):
@@ -136,7 +139,6 @@ class ImageOutput(DotDict):
         return jnp.mean(jnp.square(self.ground_truth - self.prediction))  # simple as that
 
 
-call = eqx.filter_jit(qax.use_implicit_args(lambda arg, **kwargs: arg(**kwargs)))
 call_plain = eqx.filter_jit(lambda arg, **kwargs: arg(**kwargs))
 
 
@@ -189,7 +191,13 @@ class FluxInferencer(eqx.Module):
 
         self.model = jax.tree.map(to_mesh, model, is_leaf=is_arr)
 
-    def __call__(self, text_inputs, image_inputs):
+    def __call__(
+        self,
+        text_inputs,
+        image_inputs,
+        reap_double=[],
+        reap_single=[],
+    ):
         img, timesteps, img_ids, guidance_scale, h, w = [
             image_inputs[k]
             for k in ("patched", "timesteps", "img_ids", "guidance_scale", "h", "w")
@@ -203,12 +211,13 @@ class FluxInferencer(eqx.Module):
             img_ids=img_ids,
             guidance=guidance_scale,
         )
-        # TODO fix this
-        # if "MockQuantMatrix" in str(self.model):
-        patched = call_plain(self.model, **kwargs)
-        # else:
-            # patched = call(self.model, **kwargs)
-        return ImageOutput(previous_input=image_inputs, patched=patched)
+        patched, reaped = eqx.filter_jit(post_single_reaper.reap(
+            post_double_reaper.reap(
+                self.model,
+                restrict_to_layers=reap_double,
+                no_reaped=True,),
+            restrict_to_layers=reap_single))(**kwargs)
+        return ImageOutput(previous_input=image_inputs, patched=patched, reaped=reaped)
 
     def to_mesh(self, x, already_sharded=False):
         def to_mesh_fn(x):
@@ -319,7 +328,9 @@ def main():
     logger.info("Warming up model")
     result = jax.block_until_ready(inferencer(text_inputs, image_inputs))
     logger.info("Running model")
-    result = jax.block_until_ready(inferencer(text_inputs, image_inputs))
+    result = jax.block_until_ready(inferencer(text_inputs, image_inputs, reap_double=[10], reap_single=[20]))
+
+    print({k: v.shape for k, v in result.reaped.items()})
 
     logger.info("Saving results")
     vae = inferencer.vae
