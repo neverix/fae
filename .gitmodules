@@ -4,3 +4,6 @@
 [submodule "flux_orig"]
 	path = flux_orig
 	url = https://github.com/neverix/flux
+[submodule "qax"]
+	path = qax
+	url = https://github.com/neverix/qax
