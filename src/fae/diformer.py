@@ -39,7 +39,7 @@ T = TypeVar('T', bound=eqx.Module)
 
 class SequentialScan(eqx.Module, Generic[T]):
     layer: T
-    n_layers: int
+    n_layers: int = eqx.field(static=True)
 
     def __init__(self, layers: tuple[T, ...], repeat: int = None):
         self.layer = jax.tree.map(partial(unify, repeat=repeat), *layers, is_leaf=is_arr)
@@ -47,7 +47,8 @@ class SequentialScan(eqx.Module, Generic[T]):
 
     # @eqx.filter_checkpoint
     def __call__(self, x, *args, **kwargs):
-        weights, logic = eqx.partition(self.layer, is_arr)
+        pred = lambda x: is_arr(x) and x.ndim and x.shape[0] == self.n_layers
+        weights, logic = eqx.partition(self.layer, pred)
         # weights_mock = MockQuantMatrix.mockify(weights)
 
         # def scan_fn(carry):
@@ -75,7 +76,7 @@ class SequentialScan(eqx.Module, Generic[T]):
 
         # TODO remove this
         if "MockQuantMatrix" in str(weights):
-            return eqx_scan(scan_fn, (x, jnp.array(0, dtype=jnp.uint32)), weights, kind="checkpointed")[0][0]
+            return eqx_scan(scan_fn, (x, jnp.array([0], dtype=jnp.uint32)), weights, kind="checkpointed")[0][0]
         else:
             return jax.lax.scan(scan_fn, (x, jnp.array(0, dtype=jnp.uint32)), weights)[0][0]
 
@@ -98,9 +99,9 @@ def pad_and_mask(x, pad_to=128):
 
 class DiFormer(eqx.Module):
     """Diffusion transformer."""
-    config_cls = DiFormerConfig
+    config_cls: type = eqx.field(default=DiFormerConfig, static=True)
 
-    config: DiFormerConfig
+    config: DiFormerConfig = eqx.field(static=True)
     pe_embedder: EmbedND
     time_in: MLPEmbedder
     img_in: VLinear
@@ -237,146 +238,6 @@ def weight_slice(arr, *, axis: int, start: int, size: int):
     return jax.lax.dynamic_slice_in_dim(arr, start, size, axis=axis)
 
 
-def preprocess_weights(flux, model):
-    flux = {k.replace("model.diffusion_model.", ""): v for k, v in flux.items()}
-
-    logger.info("Layer-stacking arrays")
-    flux_aggs = defaultdict(dict)
-    new_flux = {}
-    for key, value in flux.items():
-        if key.startswith("double_blocks") or key.startswith("single_blocks"):
-            base, _, key = key.partition(".")
-            index, _, key = key.partition(".")
-            flux_aggs[f"{base}.{key}"][int(index)] = value
-        else:
-            new_flux[key] = value
-    for key, values in flux_aggs.items():
-        new_weight = jnp.stack(
-            [values[i] for i in list(range(max(values.keys()) + 1))], 0
-        )
-        new_flux[key] = new_weight
-    flux = new_flux
-
-    flux = {k.replace("attn.norm", "attn.qk_norm"): v for k, v in flux.items()}
-    flux = {k.replace("attn.proj", "attn.o_proj"): v for k, v in flux.items()}
-    flux = {k.replace("attn.qkv.", "attn.qkv_proj."): v for k, v in flux.items()}
-    flux = {k.replace("mlp.0.", "mlp.in_proj."): v for k, v in flux.items()}
-    flux = {k.replace("mlp.2.", "mlp.out_proj."): v for k, v in flux.items()}
-
-    # fold in nf4 arrays
-    logger.info("Loading in quantized arrays")
-    array_flux = {}
-    nf4_flux = defaultdict(dict)
-    for key, value in flux.items():
-        if ".weight" in key:
-            key, dot_weight, name = key.partition(".weight")
-            nf4_flux[key + dot_weight][name] = value
-        else:
-            array_flux[key] = jnp.asarray(value)
-    for key, values in nf4_flux.items():
-        if set(values.keys()) == {""}:
-            array_flux[key] = values[""]
-            continue
-        if key == "single_blocks.linear1.weight":
-            og_shape = (
-                model.config.depth_single_blocks,
-                model.config.hidden_size,
-                model.config.hidden_size * 3 + model.config.mlp_size,
-            )
-            og_dtype = jnp.bfloat16
-        elif key == "single_blocks.linear2.weight":
-            og_shape = (
-                model.config.depth_single_blocks,
-                model.config.hidden_size + model.config.mlp_size,
-                model.config.hidden_size,
-            )
-            og_dtype = jnp.bfloat16
-        else:
-            try:
-                og_tensor = selector_fn(key)(model)
-            except (AttributeError, TypeError) as e:
-                raise AttributeError(f"Can't get {key}") from e
-            if og_tensor is None:
-                raise AttributeError(f"{key} is not initialized")
-            og_shape = og_tensor.shape
-            og_dtype = og_tensor.dtype
-        quants = values[""]
-        assert quants.dtype == jnp.uint8
-        og_size = quants.size
-        # quants = jax.lax.bitcast_convert_type(quants, jnp.int4)
-        high, low = jnp.divmod(quants, 16)
-        quants = jnp.stack((high, low), -1).reshape(*quants.shape[:-1], -1)
-        assert quants.size == og_size * 2
-        scales = values[".absmax"]
-        block_size = quants.size // scales.size
-        # quants = quants.reshape(*quants.shape[:-2], -1, block_size, og_shape[-1])
-        # scales = scales.reshape(*scales.shape[:-1], -1, 1, og_shape[-1])
-        quants = quants.reshape(*quants.shape[:-2], og_shape[-1], -1, block_size)
-        quants = jnp.swapaxes(quants, -2, -3)
-        quants = jnp.swapaxes(quants, -1, -2)
-        scales = scales.reshape(*scales.shape[:-1], og_shape[-1], -1, 1)
-        scales = jnp.swapaxes(scales, -2, -3)
-        scales = jnp.swapaxes(scales, -1, -2)
-        assert (quants.shape[-3] * quants.shape[-2]) == og_shape[
-            -2
-        ], f"{key}: {quants.shape} != {og_shape}"
-        quant = MockQuantMatrix(
-            shape=og_shape,
-            dtype=og_dtype,
-            quants=quants,
-            scales=scales,
-            use_approx=True,
-            use_kernel=True,
-            orig_dtype=og_tensor.dtype,
-            mesh_and_axis=None,
-        )
-        array_flux[key] = quant
-    flux = array_flux
-
-    logger.info("Splitting linear1/linear2")
-    flux = {k.replace("norm.scale", "norm.weight"): v for k, v in flux.items()}
-    linear1 = flux.pop("single_blocks.linear1.weight")
-    qkv, mlp = (
-        weight_slice(linear1, axis=-1, start=0, size=model.config.hidden_size * 3),
-        weight_slice(
-            linear1,
-            axis=-1,
-            start=model.config.hidden_size * 3,
-            size=model.config.mlp_size,
-        ),
-    )
-    flux["single_blocks.attn.qkv_proj.weight"] = qkv
-    flux["single_blocks.mlp.in_proj.weight"] = mlp
-    linear1 = flux.pop("single_blocks.linear1.bias")
-    qkv, mlp = (
-        linear1[..., : model.config.hidden_size * 3],
-        linear1[..., model.config.hidden_size * 3 :],
-    )
-    flux["single_blocks.attn.qkv_proj.bias"] = qkv
-    flux["single_blocks.mlp.in_proj.bias"] = mlp
-    linear2 = flux.pop("single_blocks.linear2.weight")
-    qkv, mlp = (
-        weight_slice(linear2, axis=1, start=0, size=model.config.hidden_size),
-        weight_slice(
-            linear2,
-            axis=1,
-            start=model.config.hidden_size,
-            size=model.config.mlp_size,
-        ),
-    )
-    flux["single_blocks.attn.o_proj.weight"] = qkv
-    flux["single_blocks.mlp.out_proj.weight"] = mlp
-    linear2 = flux.pop("single_blocks.linear2.bias")
-    flux["single_blocks.attn.o_proj.bias"] = linear2
-    flux["single_blocks.mlp.out_proj.bias"] = linear2 * 0
-    norm_keys = [key for key in flux if key.startswith("single_blocks.norm")]
-    for key in norm_keys:
-        flux[key.replace("single_blocks.norm", "single_blocks.attn.qk_norm")] = (
-            flux.pop(key)
-        )
-    return flux
-
-
 def preprocess_official(flux, model):
     logger.info("Layer-stacking arrays")
     flux_aggs = defaultdict(dict)
@@ -400,6 +261,7 @@ def preprocess_official(flux, model):
     flux = {k.replace("attn.qkv.", "attn.qkv_proj."): v for k, v in flux.items()}
     flux = {k.replace("mlp.0.", "mlp.in_proj."): v for k, v in flux.items()}
     flux = {k.replace("mlp.2.", "mlp.out_proj."): v for k, v in flux.items()}
+    flux = {k.replace("final_layer.adaLN_modulation.1.", "final_layer.adaLN_modulation."): v for k, v in flux.items()}
 
     # fold in nf4 arrays
     logger.info("Quantizing arrays")
@@ -505,6 +367,7 @@ def load_flux(
     preprocess_into = preprocess_into / "--".join(hf_path[0].split("/")) if preprocess_into else None
     if preprocess_into is None or not preprocess_into.exists():
         if path is not None:
+            assert False, "nf4 file loading no longer supported"
             flux = load_file(path)
             flux = preprocess_weights(flux, model)
         else:

@@ -77,7 +77,9 @@ class FluxEnsemble:
 
     def sample(self, texts: List[str], width: int = 512, height: int = 512,
                sample_steps: int = 1, decode_latents=True,
-               key=None):
+               key=None, return_type="images",
+               reap_double=[], reap_single=[]
+               ):
         n_tokens = width * height / (16 * 16)
         schedule = get_flux_schedule(n_tokens, sample_steps,
                                      shift_time=self.curve_schedule)
@@ -87,7 +89,13 @@ class FluxEnsemble:
         logger.info("Preparing inputs")
         text_input, image_input = self.prepare_stuff(texts, width=width, height=height, key=key)
         logger.info("Sampling image")
-        denoised = sample_jit(self.flux, text_input, image_input, schedule)
+        result = sample_jit(self.flux, text_input, image_input, schedule,
+                            return_type=return_type,
+                            reap_double=reap_double, reap_single=reap_single)
+        if return_type == "images":
+            denoised = result
+        else:
+            denoised = result[0].encoded
         assert isinstance(denoised, jnp.ndarray)
         logger.info("Decoding")
         vae = self.flux.vae
@@ -97,20 +105,27 @@ class FluxEnsemble:
             images = [vae.deprocess(decoded[i:i+1]) for i in range(denoised.shape[0])]
         else:
             images = jax.device_put(denoised, jax.devices("cpu")[0])
-        return images
+        if return_type == "images":
+            return images
+        else:
+            return images, result[1]
 
 
 @eqx.filter_jit
-def sample_jit(flux, text_input, image_input, schedule):
+def sample_jit(flux, text_input, image_input, schedule, *, return_type, **kwargs):
     schedule = schedule[:-1], schedule[1:]
     def sample_step(image_input, timesteps):
         more_noisy, less_noisy = timesteps
-        flux_result = flux(text_input, image_input)
-        return flux_result.next_input(more_noisy - less_noisy), None
-    def generate(image_input):
-        return jax.lax.scan(sample_step, image_input, schedule)[0].encoded
-    result = generate(image_input)
-    return result
+        flux_result = flux(text_input, image_input, **kwargs)
+        next_image_input = flux_result.next_input(more_noisy - less_noisy)
+        return next_image_input, (next_image_input, flux_result)
+    result = jax.lax.scan(sample_step, image_input, schedule)
+    if return_type == "images":
+        return result[0].encoded
+    elif return_type == "debug":
+        return result
+    else:
+        raise ValueError(f"Unknown return type: {return_type}")
 
 
 def get_flux_schedule(n_seq: int, n_steps: int, shift_time=True):

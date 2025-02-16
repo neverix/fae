@@ -27,14 +27,7 @@ class Reaper(object):
         prev_clobbered = sow_cond(jnp.empty((self.buffer_size,) + x.shape, dtype=x.dtype), jnp.zeros((), dtype=jnp.bool_), tag=self.tag, name=self.base_key + key)
         allowed_indices = jnp.array(self.restrict_to_layers, dtype=jnp.int32)
         new_clobbered = prev_clobbered.at[jnp.argmax(allowed_indices == index)].set(x)
-        sow_cond(new_clobbered, jnp.isin(index, allowed_indices), tag=self.tag, name=self.base_key + key, mode="cond_clobber")
-        # jax.debug.print(
-        #     "{} {} {} {}",
-        #     index,
-        #     allowed_indices,
-        #     jnp.argmax(allowed_indices == index),
-        #     jnp.isin(allowed_indices, index),
-        # )
+        sow_cond(new_clobbered, jnp.isin(index, allowed_indices)[0], tag=self.tag, name=self.base_key + key, mode="cond_clobber")
         return x
     
     @property

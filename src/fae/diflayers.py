@@ -17,24 +17,23 @@ from .interp_globals import (
 from .quant import MockQuantMatrix, dot_general_handler
 
 
-@dataclass(frozen=True)
-class DiFormerConfig:
+class DiFormerConfig(eqx.Module):
     """Configuration class for the diffusion transformer."""
 
-    in_channels: int = 64
-    time_embed_dim: int = 256
-    vec_in_dim: int = 768
-    context_in_dim: int = 4096
-    hidden_size: int = 3072
-    mlp_ratio: float = 4.0
-    num_heads: int = 24
-    depth: int = 19
-    depth_single_blocks: int = 38
-    axes_dim: tuple[int] = (16, 56, 56)
-    theta: int = 10_000
-    qkv_bias: bool = True
-    guidance_embed: bool = True
-    guidance_embed_dim: int = 256
+    in_channels: int = eqx.field(default=64, static=True)
+    time_embed_dim: int = eqx.field(default=256, static=True)
+    vec_in_dim: int = eqx.field(default=768, static=True)
+    context_in_dim: int = eqx.field(default=4096, static=True)
+    hidden_size: int = eqx.field(default=3072, static=True)
+    mlp_ratio: float = eqx.field(default=4.0, static=True)
+    num_heads: int = eqx.field(default=24, static=True)
+    depth: int = eqx.field(default=19, static=True)
+    depth_single_blocks: int = eqx.field(default=38, static=True)
+    axes_dim: tuple[int] = eqx.field(default=(16, 56, 56), static=True)
+    theta: int = eqx.field(default=10_000, static=True)
+    qkv_bias: bool = eqx.field(default=True, static=True)
+    guidance_embed: bool = eqx.field(default=True, static=True)
+    guidance_embed_dim: int = eqx.field(default=256, static=True)
 
     @property
     def mlp_size(self):
@@ -168,7 +167,7 @@ class EmbedND(eqx.Module):
 
     dim: int
     theta: int
-    axes_dim: list[int]
+    axes_dim: list[int] = eqx.field(static=True)
 
     def __call__(
         self, ids: Float[Array, "*batch n_seq n_axes"]
@@ -299,7 +298,7 @@ class VLayerNorm(nn.LayerNorm):
 class LastLayer(eqx.Module):
     norm_final: VLayerNorm
     linear: VLinear
-    adaLN_modulation: eqx.Module
+    adaLN_modulation: VLinear
 
     def __init__(
         self,
@@ -315,17 +314,14 @@ class LastLayer(eqx.Module):
         self.linear = VLinear(
             hidden_size, patch_size * patch_size * out_channels, use_bias=True, key=key
         )
-        self.adaLN_modulation = nn.Sequential(
-            (
-                nn.Lambda(jax.nn.silu),
-                VLinear(hidden_size, 2 * hidden_size, use_bias=True, key=key),
-            )
+        self.adaLN_modulation = VLinear(
+            hidden_size, 2 * hidden_size, use_bias=True, key=key
         )
 
     def __call__(
         self, x: Float[Array, "*batch n_seq hidden_size"], vec: "*batch hidden_size"
     ) -> Float[Array, "*batch n_seq hidden_size"]:
-        shift, scale = jnp.split(self.adaLN_modulation(vec), 2, axis=-1)
+        shift, scale = jnp.split(self.adaLN_modulation(jax.nn.silu(vec)), 2, axis=-1)
         x = (1 + scale[..., None, :]) * self.norm_final(x) + shift[..., None, :]
         x = self.linear(x)
         return x
@@ -371,8 +367,8 @@ class ModulationOut:
 
 
 class Modulation(eqx.Module):
-    is_double: bool
-    multiplier: int
+    is_double: bool = eqx.field(static=True)
+    multiplier: int = eqx.field(static=True)
     lin: VLinear
 
     def __init__(self, dim: int, double: bool, *, key: jax.random.PRNGKey):
@@ -398,7 +394,7 @@ class SelfAttention(eqx.Module):
     qk_norm: QKNorm
     qkv_proj: VLinear
     o_proj: VLinear
-    head_dim: int
+    head_dim: int = eqx.field(static=True)
 
     def __init__(
         self,
@@ -474,7 +470,7 @@ def fr(x):
 class DoubleStreamBlock(eqx.Module):
     """Main two-stream MMDiT block."""
 
-    config: DiFormerConfig
+    config: DiFormerConfig = eqx.field(static=True)
     img_mod: Modulation
     img_norm1: VLayerNorm
     img_attn: SelfAttention
@@ -547,8 +543,8 @@ class DoubleStreamBlock(eqx.Module):
 class SingleStreamBlock(eqx.Module):
     """Main single-stream MMDiT block."""
 
-    config: DiFormerConfig
-    head_dim: int
+    config: DiFormerConfig = eqx.field(static=True)
+    head_dim: int = eqx.field(static=True)
 
     attn: SelfAttention
     mlp: MLP

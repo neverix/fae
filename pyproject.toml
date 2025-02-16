@@ -16,7 +16,7 @@ dependencies = [
     "fh-plotly>=0.1.1",
     "flax>=0.9.0",
     "jax-smi>=1.0.4",
-    "jax[tpu]==0.5.0",
+    "jax[tpu]==0.4.35",
     "libtpu==0.0.8",
     "jaxonnxruntime",
     "libtpu-nightly",
@@ -26,16 +26,17 @@ dependencies = [
     "numba>=0.60.0",
     "onnx>=1.17.0",
     "orbax>=0.1.9",
-    "oryx>=0.2.7",
+    "oryx==0.2.7",
     "plotly-express>=0.4.1",
     "python-fasthtml>=0.10.0",
-    "qax==0.4.1",
+    "qax==0.4.0",
     "sentencepiece>=0.2.0",
     "torch==2.6.0+cpu",
     "torchvision==0.21.0+cpu",
     "transformers>=4.44.2",
     "uvicorn>=0.32.0",
     "wandb>=0.18.7",
+    "debugpy>=1.8.12",
 ]
 
 [build-system]
@@ -56,10 +57,11 @@ url = "https://storage.googleapis.com/jax-releases/libtpu_releases.html"
 [tool.uv.sources]
 jaxonnxruntime = { path = "jort" }
 libtpu-nightly = { url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu-nightly/libtpu_nightly-0.1.dev20241010+nightly.cleanup-py3-none-any.whl" }
-libtpu = { url = "https://storage.googleapis.com/libtpu-lts-releases/wheels/libtpu/libtpu-0.0.8-py3-none-linux_x86_64.whl" }
-oryx = { git = "https://github.com/jax-ml/oryx", rev = "d5d116c81fa091be4e5ea17b4d6c703dbdc397db" }
+# libtpu = { url = "https://storage.googleapis.com/libtpu-lts-releases/wheels/libtpu/libtpu-0.0.8-py3-none-linux_x86_64.whl" }
+libtpu = { url = "https://storage.googleapis.com/libtpu-lts-releases/wheels/libtpu/libtpu-0.0.2-py3-none-any.whl" }
+oryx = { git = "https://github.com/jax-ml/oryx", rev = "93fc9ef6ab99113163937246eb38580ecb093925" }
 mishax = { git = "https://github.com/google-deepmind/mishax" }
-qax = { path = "qax", editable = true }
+# qax = { path = "qax", editable = true }
 
 [tool.ruff.lint]
 ignore = ["F722"]

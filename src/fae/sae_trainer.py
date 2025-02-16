@@ -654,23 +654,24 @@ def main(*, restore: bool = False,
             appeared_prompts |= new_prompts
         key = jax.random.key(step)
         logger.remove()
-        with (post_double_stream if block_type == "double" else
-              post_single_stream if block_type == "single" else NotImplemented
-              ).capture(layer) as reaped:
-            images = ensemble.sample(
-                prompts,
-                decode_latents=False,
-                sample_steps=1,
-                key=key,
-                width=width,
-                height=height
-            )
+        images, outputs = ensemble.sample(
+            prompts,
+            decode_latents=False,
+            sample_steps=1,
+            key=key,
+            width=width,
+            height=height,
+            return_type="debug",
+            reap_double=[layer] if block_type == "double" else [],
+            reap_single=[layer] if block_type == "single" else [],
+        )
+        reaped = outputs[1].reaped
         assert isinstance(images, jnp.ndarray)  # to silence mypy
         logger.add(sys.stderr, level="INFO")
-        if block_type =="double":
-            training_data = jnp.concatenate((reaped[layer]["txt"], reaped[layer]["img"]), axis=-2)[0]
+        if block_type == "double":
+            training_data = jnp.concatenate((reaped[f"double.resid.txt"], reaped[f"double.resid.img"]), axis=-2)[0]
         else:
-            training_data = reaped[layer]
+            training_data = reaped[f"single.resid`"][0]
         training_data = config.cut_up(training_data)
         activation_cache.append(np.asarray(training_data))
         if len(activation_cache) >= config.sae_train_every:

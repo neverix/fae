@@ -736,6 +736,10 @@ class MockQuantMatrix(eqx.Module):
             self.quants.shape[-3] * self.quants.shape[-2],
             self.quants.shape[-1],
         )
+    
+    @property
+    def block_size(self):
+        return self.quants.shape[-2]
 
     @property
     def dtype(self):
