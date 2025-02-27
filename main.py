@@ -17,7 +17,7 @@ import plotly.express as px
 import traceback
 import time
 
-CACHE_DIRECTORY = "somewhere/maxacts"
+CACHE_DIRECTORY = "somewhere/maxacts_double_l18_img"
 HEIGHT, WIDTH = 16, 16
 vae = FluxVAE("somewhere/taef1/taef1_encoder.onnx", "somewhere/taef1/taef1_decoder.onnx")
 cache_dir = Path(CACHE_DIRECTORY)

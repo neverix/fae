@@ -37,6 +37,7 @@ dependencies = [
     "uvicorn>=0.32.0",
     "wandb>=0.18.7",
     "debugpy>=1.8.12",
+    "huggingface-hub[hf-transfer]>=0.28.1",
 ]
 
 [build-system]

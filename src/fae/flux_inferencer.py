@@ -264,11 +264,11 @@ class FluxInferencer(eqx.Module):
             encoded = jnp.pad(encoded, ((0, 0), (0, 0), (0, 1), (0, 0)))
 
         batch = encoded.shape[0]
+        key = random_or(key)
         if isinstance(timesteps, (int, float)):
             timesteps = jnp.full((batch,), timesteps, dtype=jnp.float32)
         elif timesteps is None:
             timesteps = jax.random.uniform(key, (batch,), dtype=jnp.float32)
-        key = random_or(key)
         noise = jax.random.normal(key, encoded.shape, dtype=encoded.dtype)
 
         if isinstance(guidance_scale, (int, float)):

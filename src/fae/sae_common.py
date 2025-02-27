@@ -97,7 +97,7 @@ class SAEConfig:
     seq_mode: Literal["both", "txt", "img"] = "both"
     site: tuple[Literal["double", "single"], int] = ("double", 18)
     n_steps: int = 30_000
-    wandb_name: Optional[tuple[str, str]] = ("neverix", "fae")
+    wandb_name: Optional[tuple[str, str]] = ("cvpr-flux-sae", "fae")
 
     tp_size: int = jax.local_device_count()
 

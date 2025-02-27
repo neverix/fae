@@ -524,14 +524,15 @@ class SAETrainer(eqx.Module):
 
 
 class SAEOverseer:
-    def __init__(self, config: SAEConfig, save_at="somewhere/sae_mid", save_every=1000, restore=False):
+    def __init__(self, config: SAEConfig, save_at="somewhere/sae_mid", save_every=1000, restore=False, sae_postfix=None):
         self.config = config
         self.key = jax.random.PRNGKey(0)
         self.sae_trainer = SAETrainer.create(config, self.key)
 
         if config.wandb_name:
             self.run = wandb.init(
-                entity=config.wandb_name[0], project=config.wandb_name[1], config=config
+                entity=config.wandb_name[0], project=config.wandb_name[1], config=config,
+                name=f"sae{sae_postfix}" if sae_postfix is not None else None,
             )
         self.bar = tqdm(total=config.n_steps)
 
@@ -610,6 +611,7 @@ def compute_whitening(data: Float[Array, "batch_size d_model"]) -> Float[Array, 
 def main(*, restore: bool = False,
          seq_mode = "img", block_type = "double", layer = 18,
          train_mode: bool = True, save_image_activations = True,
+         stop_steps=30_000,
          **extra_config_items,):
     logger.info("Loading dataset")
     prompts_dataset = load_dataset("opendiffusionai/cc12m-cleaned")
@@ -628,15 +630,17 @@ def main(*, restore: bool = False,
     if not train_mode and not restore:
         logger.warning("Enabling restore")
         restore = True
-    save_dir = f"somewhere/sae_{block_type}_l{layer}_{seq_mode}"
+    sae_postfix = f"_{block_type}_l{layer}_{seq_mode}"
+    save_dir = f"somewhere/sae{sae_postfix}"
     sae_trainer = SAEOverseer(
         config,
         save_every=None if not train_mode else 1000,
         restore=save_dir if restore else None,
-        save_at=save_dir
+        save_at=save_dir,
+        sae_postfix=sae_postfix
     )
     if not train_mode:
-        saver = SAEOutputSaver(config, Path("somewhere/maxacts"), save_image_activations=save_image_activations)
+        saver = SAEOutputSaver(config, Path(f"somewhere/maxacts{sae_postfix}"), save_image_activations=save_image_activations)
     width, height = config.width_and_height
     appeared_prompts = set()
     cycle_detected = False
@@ -671,7 +675,7 @@ def main(*, restore: bool = False,
         if block_type == "double":
             training_data = jnp.concatenate((reaped[f"double.resid.txt"], reaped[f"double.resid.img"]), axis=-2)[0]
         else:
-            training_data = reaped[f"single.resid`"][0]
+            training_data = reaped[f"single.resid"][0]
         training_data = config.cut_up(training_data)
         activation_cache.append(np.asarray(training_data))
         if len(activation_cache) >= config.sae_train_every:
@@ -714,6 +718,8 @@ def main(*, restore: bool = False,
                         )
                     )
                     saver.save(*sae_weights, *sae_indices, prompts, np.asarray(images), step)
+        if stop_steps and step >= stop_steps:
+            break
 
 
 if __name__ == "__main__":
