@@ -91,6 +91,7 @@ class SAEConfig:
         return self.dead_after_tokens // self.full_batch_size
 
     batch_size: int = 4
+    timesteps: int = 1
     sae_train_every: int = 16
     sae_batch_size_multiplier: int = 1
     seq_len: int = 512 + 256

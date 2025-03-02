@@ -2,6 +2,8 @@ from huggingface_hub import HfApi, hf_hub_download
 from tqdm.auto import tqdm
 import os
 
+
+# Thanks Deepseek
 def download_subdirectory(repo_id, subdir, local_dir, repo_type="model"):
     print(f"Downloading {subdir} from {repo_id} to {local_dir}")
     # Initialize HfApi
@@ -33,10 +35,10 @@ def download_subdirectory(repo_id, subdir, local_dir, repo_type="model"):
 # Usage
 
 repo_id = "nev/flux1-saes"
-for directory_name in "sae_single_l18_img-k64 sae_double_l9_img-k64".split():
+for directory_name in "sae_double_l18_img".split():
     download_subdirectory(
         repo_id=repo_id,
         subdir=directory_name,
-        local_dir=f"somewhere/{directory_name}"
+        local_dir="somewhere"
     )
     

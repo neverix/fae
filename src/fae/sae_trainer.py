@@ -524,7 +524,7 @@ class SAETrainer(eqx.Module):
 
 
 class SAEOverseer:
-    def __init__(self, config: SAEConfig, save_at="somewhere/sae_mid", save_every=1000, restore=False, sae_postfix=None):
+    def __init__(self, config: SAEConfig, save_at="somewhere/sae_mid", save_every=1000, restore=None, sae_postfix=None):
         self.config = config
         self.key = jax.random.PRNGKey(0)
         self.sae_trainer = SAETrainer.create(config, self.key)
@@ -551,6 +551,11 @@ class SAEOverseer:
                 options=options,
             )
             if restore:
+                self.mngr_restore = ocp.CheckpointManager(
+                    Path(restore).resolve(),
+                    ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
+                    options=options,
+                )
                 self.restore()
 
     def step(self, x: Float[Array, "batch_size d_model"]) -> SAEOutput:
@@ -579,7 +584,7 @@ class SAEOverseer:
 
 
     def restore(self):
-        save_dict = self.mngr.restore(
+        save_dict = self.mngr_restore.restore(
             self.mngr.latest_step(),
             items=dict(
                 sae_params=self.sae_trainer.sae_params,
@@ -611,6 +616,7 @@ def compute_whitening(data: Float[Array, "batch_size d_model"]) -> Float[Array, 
 def main(*, restore: bool = False,
          seq_mode = "img", block_type = "double", layer = 18,
          train_mode: bool = True, save_image_activations = True,
+         restore_from: str | None = None,
          stop_steps=30_000,
          **extra_config_items,):
     logger.info("Loading dataset")
@@ -633,11 +639,15 @@ def main(*, restore: bool = False,
     if restore:
         stop_steps = 2_000
     sae_postfix = f"_{block_type}_l{layer}_{seq_mode}-k{config.k}"
+    if config.seq_len != SAEConfig.seq_len:
+        sae_postfix += f"_sl{config.seq_len}"
     save_dir = f"somewhere/sae{sae_postfix}"
+    if restore_from is None:
+        restore_from = save_dir
     sae_trainer = SAEOverseer(
         config,
         save_every=None if not train_mode else 1000,
-        restore=save_dir if restore else None,
+        restore=restore_from if restore else None,
         save_at=save_dir,
         sae_postfix=sae_postfix
     )
@@ -663,7 +673,7 @@ def main(*, restore: bool = False,
         images, outputs = ensemble.sample(
             prompts,
             decode_latents=False,
-            sample_steps=1,
+            sample_steps=config.timesteps,
             key=key,
             width=width,
             height=height,
@@ -671,13 +681,14 @@ def main(*, restore: bool = False,
             reap_double=[layer] if block_type == "double" else [],
             reap_single=[layer] if block_type == "single" else [],
         )
-        reaped = outputs[1].reaped
+        reaped = outputs[1].reaped  # (timesteps, batch, sequence_length, d_model)
         assert isinstance(images, jnp.ndarray)  # to silence mypy
         logger.add(sys.stderr, level="INFO")
         if block_type == "double":
-            training_data = jnp.concatenate((reaped[f"double.resid.txt"], reaped[f"double.resid.img"]), axis=-2)[0]
+            training_data = jnp.concatenate((reaped[f"double.resid.txt"], reaped[f"double.resid.img"]), axis=-2)
         else:
-            training_data = reaped[f"single.resid"][0]
+            training_data = reaped[f"single.resid"]
+        training_data = training_data.reshape(-1, *training_data.shape[2:])  # (timesteps, sequence_length, d_model)
         training_data = config.cut_up(training_data)
         activation_cache.append(np.asarray(training_data))
         if len(activation_cache) >= config.sae_train_every:
