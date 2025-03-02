@@ -630,7 +630,9 @@ def main(*, restore: bool = False,
     if not train_mode and not restore:
         logger.warning("Enabling restore")
         restore = True
-    sae_postfix = f"_{block_type}_l{layer}_{seq_mode}"
+    if restore:
+        stop_steps = 2_000
+    sae_postfix = f"_{block_type}_l{layer}_{seq_mode}-k{config.k}"
     save_dir = f"somewhere/sae{sae_postfix}"
     sae_trainer = SAEOverseer(
         config,

@@ -1,0 +1,42 @@
+from huggingface_hub import HfApi, hf_hub_download
+from tqdm.auto import tqdm
+import os
+
+def download_subdirectory(repo_id, subdir, local_dir, repo_type="model"):
+    print(f"Downloading {subdir} from {repo_id} to {local_dir}")
+    # Initialize HfApi
+    api = HfApi()
+    
+    # List all files in the repository
+    print(f"Listing files in {repo_id}")
+    all_files = api.list_repo_files(repo_id=repo_id, repo_type=repo_type)
+    
+    # Filter files that belong to the target subdirectory
+    target_files = [f for f in all_files if f.startswith(f"{subdir}/")]
+    
+    print(f"Found {len(target_files)} files in {subdir}")
+    # Create local directory if it doesn't exist
+    os.makedirs(local_dir, exist_ok=True)
+    
+    # Download each file individually
+    for file in tqdm(target_files):
+        print(f"Downloading {file}")
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=file,
+            repo_type=repo_type,
+            local_dir=local_dir,
+            local_dir_use_symlinks=False  # Save actual files instead of symlinks
+        )
+    print(f"Downloaded {len(target_files)} files to {local_dir}")
+
+# Usage
+
+repo_id = "nev/flux1-saes"
+for directory_name in "sae_single_l18_img-k64 sae_double_l9_img-k64".split():
+    download_subdirectory(
+        repo_id=repo_id,
+        subdir=directory_name,
+        local_dir=f"somewhere/{directory_name}"
+    )
+    
