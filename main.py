@@ -41,6 +41,81 @@ if os.path.exists(cache_dir / "feature_acts.db") or True:
         break
 app, rt = fast_app(hdrs=plotly_headers)
 
+
+# Add a function to compute spatial metrics for a feature
+def compute_spatial_metrics(feature_id):
+    """Compute spatial metrics for a specific feature."""
+    rows = scored_storage.get_rows(feature_id)
+    
+    # Group rows by idx
+    metrics_by_image = {}
+    for (idx, h, w), score in rows:
+        key = idx
+        if key not in metrics_by_image:
+            # Create activation grid for this image
+            grid = np.zeros((HEIGHT, WIDTH), dtype=float)
+            metrics_by_image[key] = {"grid": grid, "activations": []}
+        
+        # Add score to the grid
+        metrics_by_image[key]["grid"][h, w] = score
+        metrics_by_image[key]["activations"].append((h, w, score))
+    
+    # Compute metrics for each image
+    results = {}
+    for idx, data in metrics_by_image.items():
+        grid = data["grid"]
+        
+        # Skip if no activations
+        if grid.sum() == 0:
+            continue
+            
+        # Get positions where activation occurs
+        active_positions = np.where(grid > 0)
+        if len(active_positions[0]) == 0:
+            continue
+            
+        # Compute center of mass
+        h_indices, w_indices = np.indices((HEIGHT, WIDTH))
+        total_activation = grid.sum()
+        center_h = np.sum(h_indices * grid) / total_activation if total_activation > 0 else 0
+        center_w = np.sum(w_indices * grid) / total_activation if total_activation > 0 else 0
+        
+        # Compute average distance from center of mass (spatial spread)
+        distances = np.sqrt((h_indices - center_h)**2 + (w_indices - center_w)**2)
+        avg_distance = np.sum(distances * grid) / total_activation if total_activation > 0 else 0
+        
+        # Compute concentration ratio: what percentage of total activation is in the top 25% of active pixels
+        active_values = grid[active_positions]
+        sorted_values = np.sort(active_values)[::-1]  # Sort in descending order
+        quarter_point = max(1, len(sorted_values) // 4)
+        concentration_ratio = np.sum(sorted_values[:quarter_point]) / total_activation if total_activation > 0 else 0
+        
+        # Compute activation area: percentage of image area that has activations
+        activation_area = len(active_positions[0]) / (HEIGHT * WIDTH)
+        
+        # Store metrics
+        results[idx] = {
+            "spatial_spread": float(avg_distance),
+            "concentration_ratio": float(concentration_ratio),
+            "activation_area": float(activation_area),
+            "max_activation": float(grid.max()),
+            "center": (float(center_h), float(center_w))
+        }
+    
+    # Aggregate metrics across images
+    if results:
+        avg_metrics = {
+            "spatial_spread": float(np.mean([m["spatial_spread"] for m in results.values()])),
+            "concentration_ratio": float(np.mean([m["concentration_ratio"] for m in results.values()])),
+            "activation_area": float(np.mean([m["activation_area"] for m in results.values()])),
+            "num_images": len(results)
+        }
+        return avg_metrics
+    return None
+
+# Cache for spatial metrics to avoid recomputation
+spatial_metrics_cache = {}
+
 @rt("/cached_image/{image_id}")
 def cached_image(image_id: int):
     img_path = image_cache_dir / f"{image_id}.jpg"
@@ -78,6 +153,8 @@ def top_features():
         H1(f"Top features ({len(matches)}/{len(matches) / len(scored_storage) * 100:.2f}% match criteria)"),
         Br(),
         H1(f"Spatial sparsity: {spatial_sparsity():.3f}"),
+        Br(),
+        P(A("View Spatial Metrics", href="/spatial_metrics")),
         Br(),
         *[Card(
             P(f"Feature {i}, Frequency: {frequencies[i]:.5f}, Max: {maxima[i]}"),
@@ -133,6 +210,15 @@ def maxacts(feature_id: int):
         # Add score to the corresponding location in the grid
         grouped_rows[key][h, w] = score
 
+    # Compute spatial metrics for this feature if not already cached
+    if feature_id not in spatial_metrics_cache:
+        spatial_metrics_cache[feature_id] = compute_spatial_metrics(feature_id)
+    
+    metrics = spatial_metrics_cache[feature_id]
+    metrics_display = ""
+    if metrics:
+        metrics_display = f"Spatial Spread: {metrics['spatial_spread']:.3f}, Concentration: {metrics['concentration_ratio']:.3f}, Active Area: {metrics['activation_area']:.3f}"
+    
     # Prepare images and cards
     imgs = []
     for idx, grid in sorted(grouped_rows.items(), key=lambda x: x[1].max(), reverse=True)[:20]:
@@ -191,8 +277,71 @@ def maxacts(feature_id: int):
 
     return Div(
         P(A("<- Go back", href="/top_features")),
+        H2(f"Feature {feature_id} Spatial Metrics: {metrics_display}"),
         Div(*imgs, style="display: flex; flex-wrap: wrap; gap: 20px; justify-content: center"),
         style="padding: 20px"
+    )
+
+# Add a new endpoint to view spatial metrics for all features
+@rt("/spatial_metrics")
+def spatial_metrics_view():
+    # Get all feature IDs
+    counts = scored_storage.key_counts()
+    maxima = scored_storage.key_maxima()
+    
+    # Filter features with significant activations
+    cond = maxima > 4
+    features = np.arange(len(scored_storage))[cond]
+    
+    # Compute metrics for all features (with caching)
+    all_metrics = []
+    for feature_id in features:
+        if feature_id not in spatial_metrics_cache:
+            spatial_metrics_cache[feature_id] = compute_spatial_metrics(feature_id)
+        
+        metrics = spatial_metrics_cache[feature_id]
+        if metrics:
+            all_metrics.append({
+                "feature_id": int(feature_id),
+                "spatial_spread": metrics["spatial_spread"],
+                "concentration_ratio": metrics["concentration_ratio"],
+                "activation_area": metrics["activation_area"],
+                "num_images": metrics["num_images"]
+            })
+    
+    # Sort by activation area (from most concentrated to most dispersed)
+    all_metrics.sort(key=lambda x: x["activation_area"])
+    
+    # Create scatter plot of concentration vs spatial spread
+    scatter_plot = plotly2fasthtml(px.scatter(
+        x=[m["activation_area"] for m in all_metrics],
+        y=[m["concentration_ratio"] for m in all_metrics],
+        hover_name=[f"Feature {m['feature_id']}" for m in all_metrics],
+        labels={"x": "Activation Area (% of image)", "y": "Concentration Ratio"},
+        title="Spatial Concentration Analysis"
+    ))
+    
+    # Create cards for features
+    feature_cards = [
+        Card(
+            P(f"Feature {m['feature_id']}"),
+            P(f"Concentration: {m['concentration_ratio']:.3f}"),
+            P(f"Active Area: {m['activation_area']:.3f}%"),
+            P(f"Spatial Spread: {m['spatial_spread']:.3f}"),
+            A("View Max Acts", href=f"/maxacts/{m['feature_id']}"),
+            style="width: 200px; margin: 10px;"
+        ) for m in all_metrics[:50]  # Show top 50 most concentrated features
+    ]
+    
+    return Div(
+        H1("Spatial Metrics Analysis"),
+        P(A("<- Go back", href="/top_features")),
+        Br(),
+        scatter_plot,
+        Br(),
+        H2("Most Concentrated Features (Lowest Activation Area)"),
+        Div(*feature_cards, style="display: flex; flex-wrap: wrap; justify-content: center;"),
+        style="padding: 20px;"
     )
 
 NUM_PROMPTS = 4
@@ -248,6 +397,7 @@ def home():
         H1("fae"),
         H2("SAE"),
         P(A("Top features", href="/top_features")),
+        P(A("Spatial Metrics", href="/spatial_metrics")),
         P(A("Generator", href="/gen_image")),
         style="padding: 5em"
     )
