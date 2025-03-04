@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import time
 import traceback
+import json
 
 # Import after setting up arguments to avoid immediate loading
 def main():
@@ -24,6 +25,10 @@ def main():
                         help="Clear the image cache before starting")
     parser.add_argument("--metrics-only", action="store_true",
                         help="Only compute and output metrics without starting the server")
+    parser.add_argument("--json-output", type=str,
+                        help="Path to save metrics as JSON (only used with --metrics-only)")
+    parser.add_argument("--json-pretty", action="store_true",
+                        help="Pretty-print the JSON output")
     
     args = parser.parse_args()
     
@@ -144,19 +149,56 @@ def main():
             if counts[feature_id] > 0:
                 metrics = compute_spatial_metrics(feature_id)
                 if metrics:
-                    all_metrics[feature_id] = metrics
+                    # Convert numpy values to Python native types for JSON serialization
+                    metrics_dict = {
+                        "center": (float(metrics["center"][0]), float(metrics["center"][1])),
+                        "spatial_spread": float(metrics["spatial_spread"]),
+                        "concentration_ratio": float(metrics["concentration_ratio"]),
+                        "activation_area": float(metrics["activation_area"]),
+                        "frequency": float(frequencies[feature_id]),
+                        "count": int(counts[feature_id]),
+                        "max_activation": float(maxima[feature_id])
+                    }
+                    all_metrics[feature_id] = metrics_dict
         
-        # Output summary statistics
-        print(f"Total features: {len(scored_storage)}")
-        print(f"Features with activations: {len(all_metrics)}")
-        
+        # Calculate summary statistics
         avg_spread = np.mean([m['spatial_spread'] for m in all_metrics.values()])
         avg_concentration = np.mean([m['concentration_ratio'] for m in all_metrics.values()])
         avg_area = np.mean([m['activation_area'] for m in all_metrics.values()])
         
+        # Output summary statistics
+        print(f"Total features: {len(scored_storage)}")
+        print(f"Features with activations: {len(all_metrics)}")
         print(f"Average spatial spread: {avg_spread:.3f}")
         print(f"Average concentration ratio: {avg_concentration:.3f}")
         print(f"Average activation area: {avg_area:.3f}")
+        
+        # Prepare JSON output
+        metrics_json = {
+            "summary": {
+                "total_features": len(scored_storage),
+                "features_with_activations": len(all_metrics),
+                "spatial_sparsity": float(sparsity),
+                "avg_spatial_spread": float(avg_spread),
+                "avg_concentration_ratio": float(avg_concentration),
+                "avg_activation_area": float(avg_area)
+            },
+            "features": all_metrics
+        }
+        
+        # Save JSON output if requested
+        if args.json_output:
+            json_path = Path(args.json_output)
+            # Create parent directories if they don't exist
+            json_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Write JSON to file
+            with open(json_path, 'w') as f:
+                if args.json_pretty:
+                    json.dump(metrics_json, f, indent=2)
+                else:
+                    json.dump(metrics_json, f)
+            print(f"Metrics saved to {json_path}")
         
         return
     
