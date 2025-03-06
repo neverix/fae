@@ -641,6 +641,8 @@ def main(*, restore: bool = False,
     sae_postfix = f"_{block_type}_l{layer}_{seq_mode}-k{config.k}"
     if config.seq_len != SAEConfig.seq_len:
         sae_postfix += f"_sl{config.seq_len}"
+    if config.timesteps != SAEConfig.timesteps:
+        sae_postfix += f"_t{config.timesteps}"
     save_dir = f"somewhere/sae{sae_postfix}"
     if restore_from is None:
         restore_from = save_dir
@@ -690,13 +692,24 @@ def main(*, restore: bool = False,
             training_data = reaped[f"single.resid"]
         training_data = training_data.reshape(-1, *training_data.shape[2:])  # (timesteps, sequence_length, d_model)
         training_data = config.cut_up(training_data)
-        activation_cache.append(np.asarray(training_data))
+        take_data = int(len(training_data) * config.use_data_fraction)
+        if config.transfer_to_cpu:
+            training_data = np.asarray(training_data)
+            np.random.shuffle(training_data)
+            training_data = training_data[:take_data]
+        else:
+            training_data = jax.random.permutation(key, training_data)[:take_data]
+            training_data = jax.device_put(
+                training_data,
+                jax.sharding.NamedSharding(sae_trainer.mesh, jax.sharding.PartitionSpec("dp", *((None,) * (training_data.ndim - 1)))))
+        activation_cache.append(training_data)
         if len(activation_cache) >= config.sae_train_every:
             assert config.sae_train_every % config.sae_batch_size_multiplier == 0
-            for _ in range(config.sae_train_every // config.sae_batch_size_multiplier):
+            for inner_step in range(config.sae_train_every // config.sae_batch_size_multiplier):
                 if train_mode:
                     cache_data = np.concatenate(activation_cache, axis=0)
-                    np.random.shuffle(cache_data)
+                    if config.transfer_to_cpu and inner_step == 0:
+                        np.random.shuffle(cache_data)
                     if len(cache_data) == config.train_batch_size:
                         training_data, activation_cache = cache_data, []
                     else:
@@ -704,10 +717,6 @@ def main(*, restore: bool = False,
                         training_data = cache_data[:config.train_batch_size]
                 else:
                     assert config.sae_batch_size_multiplier == config.sae_train_every == 1
-                # if normalization_hack is None:
-                #     normalization_hack = 1 / training_data.std(axis=0)
-                # else:
-                #     training_data = training_data * normalization_hack
                 if int(sae_trainer.sae_trainer.sae_logic.info.n_steps) == 0 and config.use_pca:
                     sae_trainer.sae_trainer = eqx.tree_at(
                         lambda x: x.sae_logic.info.whitening_matrix,

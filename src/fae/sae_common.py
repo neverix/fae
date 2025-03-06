@@ -93,6 +93,8 @@ class SAEConfig:
     batch_size: int = 4
     timesteps: int = 1
     sae_train_every: int = 16
+    use_data_fraction: float = 1.0
+    transfer_to_cpu: bool = True
     sae_batch_size_multiplier: int = 1
     seq_len: int = 512 + 256
     seq_mode: Literal["both", "txt", "img"] = "both"
@@ -123,8 +125,12 @@ class SAEConfig:
         return self.seq_len
 
     @property
+    def real_batch_size(self):
+        return self.timesteps * self.batch_size
+
+    @property
     def full_batch_size(self):
-        return self.batch_size * self.real_seq_len
+        return self.real_batch_size * self.real_seq_len
 
     @property
     def train_batch_size(self):
@@ -153,7 +159,7 @@ class SAEConfig:
     def uncut(
         self, tensor: Float[Array, "full_batch_size *dims"]
     ) -> tuple[Float[Array, "*batch txt_seq_len d_model"], Float[Array, "*batch img_seq_len d_model"]]:
-        unbatched = tensor.reshape(self.batch_size, -1, *tensor.shape[1:])
+        unbatched = tensor.reshape(self.real_batch_size, -1, *tensor.shape[1:])
         if self.seq_mode == "txt":
             assert unbatched.shape[1] == 512
             txt = unbatched
