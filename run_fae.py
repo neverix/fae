@@ -11,7 +11,7 @@ import json
 # Import after setting up arguments to avoid immediate loading
 def main():
     parser = argparse.ArgumentParser(description="Run the FAE visualization tool with configurable parameters")
-    parser.add_argument("--cache-path", type=str, default="somewhere/maxacts_double_l18_img",
+    parser.add_argument("--cache-path", type=str, default="somewhere/maxacts_itda_50k_256/itda_new_data",
                         help="Path to the cache directory containing feature activations")
     parser.add_argument("--width", type=int, default=16,
                         help="Default width for generated images")
@@ -29,6 +29,8 @@ def main():
                         help="Path to save metrics as JSON (only used with --metrics-only)")
     parser.add_argument("--json-pretty", action="store_true",
                         help="Pretty-print the JSON output")
+    parser.add_argument("--sample-size", type=int, default=-1,
+                        help="Only process a sample of features (-1 means process all features)")
     
     args = parser.parse_args()
     
@@ -48,7 +50,7 @@ def main():
     
     # Setup paths
     cache_dir = Path(CACHE_DIRECTORY)
-    image_activations_dir = cache_dir / "image_activations"
+    image_activations_dir = Path("somewhere/maxacts_itda_50k_256/image_activations_itda_new")
     
     # Clear image cache if requested
     image_cache_dir = Path("somewhere/img_cache")
@@ -106,9 +108,16 @@ def main():
         top_25_percent = int(len(scores) * 0.25) or 1
         concentration_ratio = np.sum(scores[sorted_indices[:top_25_percent]]) / total_score
         
-        # Calculate activation area (percentage of grid cells with any activation)
-        activation_area = np.sum(scores > 0) / len(scores)
-        
+        # Calculate activation area (percentage of grid cells with activation above a threshold)
+        threshold = 0.3
+        activation_area = np.sum(scores > threshold) / len(scores)
+
+        # Print the feature id and the metrics
+        print(f"Feature {feature_id}:")
+        print(f"  Spatial Spread: {spatial_spread:.3f}")
+        print(f"  Concentration Ratio: {concentration_ratio:.3f}")
+        print(f"  Activation Area: {activation_area:.3f}")
+
         return {
             "center": (center_h, center_w),
             "spatial_spread": spatial_spread,
@@ -137,10 +146,16 @@ def main():
         maxima = scored_storage.key_maxima()
         frequencies = counts.astype(np.float64) / counts.sum()
         
-        # Compute metrics for all features
+        # Compute metrics for features
         all_metrics = {}
-        for feature_id in range(len(scored_storage)):
-            if counts[feature_id] < 6:
+        # Process all features or just a sample based on command-line argument
+        feature_count = len(scored_storage)
+        if args.sample_size > 0:
+            feature_count = min(args.sample_size, feature_count)
+            print(f"Processing sample of {feature_count} features")
+        
+        for feature_id in range(feature_count):
+            if counts[feature_id] >= 6:
                 metrics = compute_spatial_metrics(feature_id)
                 if metrics:
                     # Convert numpy values to Python native types for JSON serialization
@@ -156,7 +171,11 @@ def main():
                     all_metrics[feature_id] = metrics_dict
         
         # Calculate summary statistics
-        avg_spread = np.mean([m['spatial_spread'] for m in all_metrics.values()])
+        spatial_spreads = np.array([m['spatial_spread'] for m in all_metrics.values()])
+        avg_spread = np.mean(spatial_spreads)
+        var_spread = np.var(spatial_spreads)
+        index_of_dispersion = var_spread / avg_spread if avg_spread > 0 else 0
+        
         avg_concentration = np.mean([m['concentration_ratio'] for m in all_metrics.values()])
         avg_area = np.mean([m['activation_area'] for m in all_metrics.values()])
         
@@ -164,6 +183,7 @@ def main():
         print(f"Total features: {len(scored_storage)}")
         print(f"Features with activations: {len(all_metrics)}")
         print(f"Average spatial spread: {avg_spread:.3f}")
+        print(f"Index of dispersion: {index_of_dispersion:.3f}")
         print(f"Average concentration ratio: {avg_concentration:.3f}")
         print(f"Average activation area: {avg_area:.3f}")
         
@@ -174,6 +194,7 @@ def main():
                 "features_with_activations": len(all_metrics),
                 "spatial_sparsity": float(sparsity),
                 "avg_spatial_spread": float(avg_spread),
+                "index_of_dispersion": float(index_of_dispersion),
                 "avg_concentration_ratio": float(avg_concentration),
                 "avg_activation_area": float(avg_area)
             },
