@@ -84,35 +84,9 @@ def main():
         # Extract positions and scores
         positions = []
         scores = []
-        
-        # Process images similar to compute_spatial_sparsity
-        img_list = list(image_activations_dir.glob("*.npz"))
-        for img in img_list:
-            saved = np.load(img)
-            ind, wei = saved["arr_0"].ravel(), saved["arr_1"].ravel()
-            
-            # Filter for this specific feature
-            feature_mask = ind == feature_id
-            # Count activations for this feature in this image
-            activation_count = np.sum((feature_mask) & (wei > 0.0))
-            
-            # Skip images where this feature doesn't activate on at least 3 cells
-            if activation_count < 3:
-                continue
-                
-            # Get positions and weights for this feature
-            feature_weights = wei[feature_mask]
-            
-            # Convert linear indices to 2D positions (assuming we know the image dimensions)
-            # This assumes the indices are flattened in row-major order
-            linear_positions = np.where(feature_mask)[0]
-            h_positions = linear_positions // WIDTH
-            w_positions = linear_positions % WIDTH
-            
-            for h, w, score in zip(h_positions, w_positions, feature_weights):
-                if score > 0.0:  # Only consider positive activations
-                    positions.append((h, w))
-                    scores.append(score)
+        for (idx, h, w), score in rows:
+            positions.append((h, w))
+            scores.append(score)
         
         positions = np.array(positions)
         scores = np.array(scores)
@@ -138,9 +112,11 @@ def main():
         threshold = 0.3
         activation_area = np.sum(scores > threshold) / len(scores)
 
-        # Only print every 1000th feature to reduce output
-        if feature_id % 1000 == 0:
-            print(f"Processing feature {feature_id}/{len(scored_storage)}")
+        # Print the feature id and the metrics
+        print(f"Feature {feature_id}:")
+        print(f"  Spatial Spread: {spatial_spread:.3f}")
+        print(f"  Concentration Ratio: {concentration_ratio:.3f}")
+        print(f"  Activation Area: {activation_area:.3f}")
 
         return {
             "center": (center_h, center_w),
@@ -159,7 +135,7 @@ def main():
                 saved = np.load(img)
                 ind, wei = saved["arr_0"].ravel(), saved["arr_1"].ravel()
                 feature_counts = np.bincount(ind[wei > 0.0], minlength=len(scored_storage))
-                non_sparse_features |= feature_counts > 5
+                non_sparse_features |= feature_counts > 6
             return 1 - non_sparse_features.mean()
         
         sparsity = compute_spatial_sparsity()
@@ -179,7 +155,7 @@ def main():
             print(f"Processing sample of {feature_count} features")
         
         for feature_id in range(feature_count):
-            if counts[feature_id] >= 5:
+            if counts[feature_id] >= 6:
                 metrics = compute_spatial_metrics(feature_id)
                 if metrics:
                     # Convert numpy values to Python native types for JSON serialization
