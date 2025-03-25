@@ -116,7 +116,7 @@ def main():
         # Calculate binary activation pattern and entropy
         if image_count > 0:
             avg_activation_pattern /= image_count
-            binary_pattern = (avg_activation_pattern > 0.5).astype(float)
+            binary_pattern = (avg_activation_pattern > ACTIVATION_THRESHOLD).astype(float)
             
             # Get coordinates of activated points
             activated_coords = np.array(np.where(binary_pattern > 0)).T
