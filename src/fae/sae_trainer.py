@@ -631,6 +631,7 @@ def main(*, restore: bool = False,
         **(dict(sae_train_every=1,
         sae_batch_size_multiplier=1)
         if not train_mode else {}),
+        site = (block_type, layer),
         **extra_config_items,
     )
     if not train_mode and not restore:
@@ -660,6 +661,17 @@ def main(*, restore: bool = False,
     cycle_detected = False
     activation_cache = []
     # normalization_hack = None
+    
+    @jax.jit
+    def process_reaped(reaped):
+        if block_type == "double":
+            training_data = jnp.concatenate((reaped[f"double.resid.txt"], reaped[f"double.resid.img"]), axis=-2)
+        else:
+            training_data = reaped[f"single.resid"]
+        training_data = training_data.reshape(-1, *training_data.shape[2:])  # (timesteps, sequence_length, d_model)
+        training_data = config.cut_up(training_data)
+        return training_data
+    
     for step, prompts in zip(range(config.n_steps), chunked(prompts_iterator, config.batch_size)):
         if len(prompts) < config.batch_size:
             logger.warning("End of dataset")
@@ -686,38 +698,39 @@ def main(*, restore: bool = False,
         reaped = outputs[1].reaped  # (timesteps, batch, sequence_length, d_model)
         assert isinstance(images, jnp.ndarray)  # to silence mypy
         logger.add(sys.stderr, level="INFO")
-        if block_type == "double":
-            training_data = jnp.concatenate((reaped[f"double.resid.txt"], reaped[f"double.resid.img"]), axis=-2)
-        else:
-            training_data = reaped[f"single.resid"]
-        training_data = training_data.reshape(-1, *training_data.shape[2:])  # (timesteps, sequence_length, d_model)
-        training_data = config.cut_up(training_data)
+        training_data = process_reaped(reaped)
         take_data = int(len(training_data) * config.use_data_fraction)
         if config.transfer_to_cpu:
-            training_data = np.asarray(training_data)
+            training_data = np.array(training_data)
             np.random.shuffle(training_data)
             training_data = training_data[:take_data]
         else:
             training_data = jax.random.permutation(key, training_data)[:take_data]
-            training_data = jax.device_put(
-                training_data,
-                jax.sharding.NamedSharding(sae_trainer.mesh, jax.sharding.PartitionSpec("dp", *((None,) * (training_data.ndim - 1)))))
         activation_cache.append(training_data)
         if len(activation_cache) >= config.sae_train_every:
             assert config.sae_train_every % config.sae_batch_size_multiplier == 0
             for inner_step in range(config.sae_train_every // config.sae_batch_size_multiplier):
                 if train_mode:
-                    cache_data = np.concatenate(activation_cache, axis=0)
-                    if config.transfer_to_cpu and inner_step == 0:
-                        np.random.shuffle(cache_data)
+                    if config.transfer_to_cpu:
+                        cache_data = np.concatenate(activation_cache, axis=0)
+                        if inner_step == 0:
+                            np.random.shuffle(cache_data)
+                    else:
+                        if len(activation_cache) == 1:
+                            cache_data = activation_cache[0]
+                        else:
+                            cache_data = jnp.concatenate(activation_cache, axis=0)
+                        # cache_data = jax.jit(lambda x: jnp.concatenate(x, axis=0))(activation_cache)
                     if len(cache_data) == config.train_batch_size:
                         training_data, activation_cache = cache_data, []
                     else:
                         activation_cache = [cache_data[config.train_batch_size:]]
                         training_data = cache_data[:config.train_batch_size]
+                    if config.transfer_to_cpu:
+                        training_data = jnp.asarray(training_data)
                 else:
                     assert config.sae_batch_size_multiplier == config.sae_train_every == 1
-                if int(sae_trainer.sae_trainer.sae_logic.info.n_steps) == 0 and config.use_pca:
+                if int(sae_trainer.sae_trainer.sae_logic.info.n_steps) == 0 and config.use_pca and config.do_update:
                     sae_trainer.sae_trainer = eqx.tree_at(
                         lambda x: x.sae_logic.info.whitening_matrix,
                         sae_trainer.sae_trainer,
@@ -725,7 +738,7 @@ def main(*, restore: bool = False,
                     )
                 sae_outputs = sae_trainer.step(
                     jax.device_put(
-                        jnp.asarray(training_data),
+                        training_data,
                         jax.sharding.NamedSharding(sae_trainer.mesh, jax.sharding.PartitionSpec("dp", None))))
                 if not train_mode:
                     sae_weights, sae_indices = map(

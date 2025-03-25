@@ -1,4 +1,5 @@
 import jax
+import equinox as eqx
 import jax.numpy as jnp
 from dataclasses import dataclass
 from jaxtyping import Array, Float, UInt
@@ -143,6 +144,7 @@ class SAEConfig:
         width_and_height = math.isqrt(width_height_product)
         return width_and_height, width_and_height
 
+    @eqx.filter_jit
     def cut_up(
         self, training_data: Float[Array, "*batch seq_len d_model"]
     ) -> Float[Array, "full_batch_size d_model"]:
