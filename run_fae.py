@@ -8,11 +8,12 @@ import time
 import traceback
 import einops
 import json
+from scipy.spatial.distance import pdist  # Add to imports at top
 
 # Import after setting up arguments to avoid immediate loading
 def main():
     parser = argparse.ArgumentParser(description="Run the FAE visualization tool with configurable parameters")
-    parser.add_argument("--cache-path", type=str, default="somewhere/maxacts_itda_50k_256/itda_new_data",
+    parser.add_argument("--cache-path", type=str, default="somewhere/maxacts_double_l12_img-k64",
                         help="Path to the cache directory containing feature activations")
     parser.add_argument("--width", type=int, default=16,
                         help="Default width for generated images")
@@ -53,7 +54,8 @@ def main():
     ACTIVATION_IMAGE_THRESHOLD = args.activation_image_threshold
     # Setup paths
     cache_dir = Path(CACHE_DIRECTORY)
-    image_activations_dir = Path("somewhere/maxacts_itda_50k_256/image_activations_itda_new")
+    # Use the activations directory directly from the cache path
+    image_activations_dir = cache_dir / "image_activations"
     
     # Clear image cache if requested
     image_cache_dir = Path("somewhere/img_cache")
@@ -77,25 +79,70 @@ def main():
 
     # Compute spatial metrics for a feature
     def compute_spatial_metrics(feature_id):
-        #print(f"Computing spatial metrics for feature {feature_id}")
         rows = scored_storage.get_rows(feature_id)
         if not rows:
             print(f"No rows found for feature {feature_id}")
             return None
+        
+        # Add accumulator for average activation pattern
+        avg_activation_pattern = np.zeros((HEIGHT, WIDTH), dtype=float)
+        image_count = 0
         
         # Group rows by idx
         metrics_by_image = {}
         for (idx, h, w), score in rows:
             key = idx
             if key not in metrics_by_image:
-                # Create activation grid for this image
                 grid = np.zeros((HEIGHT, WIDTH), dtype=float)
                 metrics_by_image[key] = {"grid": grid, "activations": []}
             
-            # Add score to the grid
-            metrics_by_image[key]["grid"][h, w] = score
-            metrics_by_image[key]["activations"].append((h, w, score))
-        
+            full_activations = np.load(image_activations_dir / f"{idx}.npz")
+            gravel = grid.ravel()
+            k = full_activations["arr_0"].shape[1]
+            for i, (f, w) in enumerate(zip(full_activations["arr_0"].ravel(), full_activations["arr_1"].ravel())):
+                if f == feature_id:
+                    gravel[i // k] = w
+            
+            grid = gravel.reshape((HEIGHT, WIDTH))
+            metrics_by_image[key]["grid"] = grid
+            
+            # Only include grids that meet activation thresholds
+            if grid.sum() > ACTIVATION_IMAGE_THRESHOLD:
+                active_positions = np.where(grid > ACTIVATION_THRESHOLD)
+                if len(active_positions[0]) > ACTIVATED_POSITIONS_THRESHOLD:
+                    avg_activation_pattern += (grid > ACTIVATION_THRESHOLD).astype(float)
+                    image_count += 1
+
+        # Calculate binary activation pattern and entropy
+        if image_count > 0:
+            avg_activation_pattern /= image_count
+            binary_pattern = (avg_activation_pattern > 0.5).astype(float)
+            
+            # Get coordinates of activated points
+            activated_coords = np.array(np.where(binary_pattern > 0)).T
+            
+            if len(activated_coords) > 1:
+                # Calculate pairwise distances between all activated points
+                distances = []
+                for i in range(len(activated_coords)):
+                    for j in range(i + 1, len(activated_coords)):
+                        dist = np.sqrt(np.sum((activated_coords[i] - activated_coords[j]) ** 2))
+                        distances.append(dist)
+                avg_distance = np.mean(distances) if distances else 0.0
+            else:
+                avg_distance = 0.0
+
+            # Rest of entropy calculation
+            flat_pattern = binary_pattern.ravel()
+            counts = np.bincount(flat_pattern.astype(int), minlength=2)
+            probabilities = counts / len(flat_pattern)
+            probabilities = probabilities[probabilities > 0]
+            entropy = -np.sum(probabilities * np.log2(probabilities))
+        else:
+            entropy = 0.0
+            binary_pattern = np.zeros((HEIGHT, WIDTH))
+            avg_distance = 0.0
+
         # Compute metrics for each image
         results = {}
         for idx, data in metrics_by_image.items():
@@ -106,7 +153,6 @@ def main():
             if grid.sum() <= ACTIVATION_IMAGE_THRESHOLD:
                #print(f"Skipping image {idx} in feature {feature_id} because the sum of activations is below threshold")
                 continue
-                
             # Get positions where activation occurs
             active_positions = np.where(grid > ACTIVATION_THRESHOLD)
             #print(f"Active positions: {active_positions}")
@@ -117,21 +163,23 @@ def main():
                 #print(f"Threshold: {ACTIVATED_POSITIONS_THRESHOLD}")
                 continue
             
-            print(f"Image {idx} in feature {feature_id} has enough activated positions")
+            # print(f"Image {idx} in feature {feature_id} has enough activated positions")
             # Compute center of mass
+            # get mean activation position
             h_indices, w_indices = np.indices((HEIGHT, WIDTH))
             total_activation = grid.sum()
             center_h = np.sum(h_indices * grid) / total_activation if total_activation > 0 else 0
             center_w = np.sum(w_indices * grid) / total_activation if total_activation > 0 else 0
             
             # Compute average distance from center of mass (spatial spread)
-            distances = np.sqrt((h_indices - center_h)**2 + (w_indices - center_w)**2)
-            avg_distance = np.sum(distances * grid) / total_activation if total_activation > 0 else 0
+            #distances = np.sqrt((h_indices - center_h)**2 + (w_indices - center_w)**2)
+            # we only want to get mean activation position
+            # avg_distance = np.sum(distances * grid) / total_activation if total_activation > 0 else 0
             
             # Compute concentration ratio: what percentage of total activation is in the top 25% of active pixels
-            active_values = grid[active_positions]
-            sorted_values = np.sort(active_values)[::-1]  # Sort in descending order
-            quarter_point = max(1, len(sorted_values) // 4)
+            #active_values = grid[active_positions]
+            #sorted_values = np.sort(active_values)[::-1]  # Sort in descending order
+            #quarter_point = max(1, len(sorted_values) // 4)
            # concentration_ratio = np.sum(sorted_values[:quarter_point]) / total_activation if total_activation > 0 else 0
             
             # Compute activation area: percentage of image area that has activations
@@ -141,44 +189,49 @@ def main():
             results[idx] = {
                 "feature_id": feature_id,
                 "image_id": idx,
-                "spatial_spread": float(avg_distance),
+                #"spatial_spread": float(avg_distance),
                 #"concentration_ratio": float(concentration_ratio),
                 #"activation_area": float(activation_area),
                 "max_activation": float(grid.max()),
                 "total_activation": float(total_activation),
                 "center": (float(center_h), float(center_w))
             }
-            print(results[idx])
+            # print(results[idx])
+
+        # Calculate weighted averages based on total activation in each image
+        total_activations = {idx: np.sum(data["grid"]) for idx, data in metrics_by_image.items() if idx in results}
+        total_weight = sum(total_activations.values())
+        # Weighted center calculation
+        weighted_center_h = sum(results[idx]["center"][0] * total_activations[idx] for idx in results) / total_weight if total_weight > 0 else 0
+        weighted_center_w = sum(results[idx]["center"][1] * total_activations[idx] for idx in results) / total_weight if total_weight > 0 else 0
         
-        # Aggregate metrics across images
-        if results:
-            # Calculate index of dispersion (variance-to-mean ratio) for centers
-            centers = np.array([m["center"] for m in results.values()])
-            mean_center = np.mean(centers, axis=0)
-            variance_center = np.var(centers, axis=0)
-            index_of_dispersion = np.mean(variance_center / mean_center) if np.all(mean_center > 0) else 0
+        # Standard deviation from mean activation position
+        # Doing this for each dimension separately because I forgot how to consider them together
+        std_dev_h = np.sqrt(sum((results[idx]["center"][0] - weighted_center_h)**2 * total_activations[idx] for idx in results) / total_weight) if total_weight > 0 else 0
+        std_dev_w = np.sqrt(sum((results[idx]["center"][1] - weighted_center_w)**2 * total_activations[idx] for idx in results) / total_weight) if total_weight > 0 else 0
+        
+        # Weighted spatial spread calculation
+        #weighted_spread = sum(results[idx]["spatial_spread"] * total_activations[idx] for idx in results) / total_weight if total_weight > 0 else 0
+        
+        avg_metrics = {
+            "feature_id": feature_id,
+            #"spatial_spread": float(weighted_spread),
+            #"concentration_ratio": float(np.mean([m["concentration_ratio"] for m in results.values()])),
+            #"activation_area": float(np.mean([m["activation_area"] for m in results.values()])),
+            "num_images": len(results),
+            #"index_of_dispersion": float(index_of_dispersion),
+            "center": (float(weighted_center_h), float(weighted_center_w)),
+            "std_dev": (float(std_dev_h), float(std_dev_w)),
+            "entropy": float(entropy),
+            "avg_activation_distance": float(avg_distance),
+            "activation_pattern": binary_pattern.tolist()  # Include binary pattern in results
+        }
+        # Add tag for active features
+        avg_metrics["active"] = len(results) >= FEATURE_ACTIVATED_IMAGES_THRESHOLD
             
-            # Calculate weighted averages based on total activation in each image
-            total_activations = {idx: np.sum(data["grid"]) for idx, data in metrics_by_image.items() if idx in results}
-            total_weight = sum(total_activations.values())
-            # Weighted center calculation
-            weighted_center_h = sum(results[idx]["center"][0] * total_activations[idx] for idx in results) / total_weight if total_weight > 0 else 0
-            weighted_center_w = sum(results[idx]["center"][1] * total_activations[idx] for idx in results) / total_weight if total_weight > 0 else 0
-            
-            # Weighted spatial spread calculation
-            weighted_spread = sum(results[idx]["spatial_spread"] * total_activations[idx] for idx in results) / total_weight if total_weight > 0 else 0
-            
-            avg_metrics = {
-                "feature_id": feature_id,
-                "spatial_spread": float(weighted_spread),
-                #"concentration_ratio": float(np.mean([m["concentration_ratio"] for m in results.values()])),
-                #"activation_area": float(np.mean([m["activation_area"] for m in results.values()])),
-                "num_images": len(results),
-                "index_of_dispersion": float(index_of_dispersion),
-                "center": (float(weighted_center_h), float(weighted_center_w))
-            }
+        if avg_metrics["active"]:
             print(avg_metrics)
-            return avg_metrics
+        return avg_metrics
     
     def compute_spatial_sparsity():
         non_sparse_features = np.zeros(len(scored_storage), dtype=bool)
@@ -213,20 +266,20 @@ def main():
                 # Convert numpy values to Python native types for JSON serialization
                 metrics_dict = {
                     "center": (float(metrics["center"][0]), float(metrics["center"][1])),
-                    "spatial_spread": float(metrics["spatial_spread"]),
-                    #"concentration_ratio": float(metrics["concentration_ratio"]),
-                   # "activation_area": float(metrics["activation_area"]),
                     "frequency": float(frequencies[feature_id]),
                     "count": int(counts[feature_id]),
-                    "max_activation": float(maxima[feature_id])
+                    "max_activation": float(maxima[feature_id]),
+                    "entropy": float(metrics["entropy"]),
+                    "avg_activation_distance": float(metrics["avg_activation_distance"]),
+                    "activation_pattern": metrics["activation_pattern"]
                 }
                 all_metrics[feature_id] = metrics_dict
     
     # Calculate summary statistics
-    spatial_spreads = np.array([m['spatial_spread'] for m in all_metrics.values()])
-    avg_spread = np.mean(spatial_spreads)
-    var_spread = np.var(spatial_spreads)
-    index_of_dispersion = var_spread / avg_spread if avg_spread > 0 else 0
+    #spatial_spreads = np.array([m['spatial_spread'] for m in all_metrics.values()])
+    #avg_spread = np.mean(spatial_spreads)
+    #var_spread = np.var(spatial_spreads)
+    #index_of_dispersion = var_spread / avg_spread if avg_spread > 0 else 0
     
     #avg_concentration = np.mean([m['concentration_ratio'] for m in all_metrics.values()])
     #avg_area = np.mean([m['activation_area'] for m in all_metrics.values()])
@@ -234,19 +287,24 @@ def main():
     # Output summary statistics
     print(f"Total features: {len(scored_storage)}")
     print(f"Features with activations: {len(all_metrics)}")
-    print(f"Average spatial spread: {avg_spread:.3f}")
-    print(f"Index of dispersion: {index_of_dispersion:.3f}")
-    #print(f"Average concentration ratio: {avg_concentration:.3f}")
-    #print(f"Average activation area: {avg_area:.3f}")
     
+    # Print features with non-zero entropy
+    nonzero_entropy_features = {
+        fid: metrics for fid, metrics in all_metrics.items() 
+        if metrics["entropy"] > 0
+    }
+    print(f"\nFeatures with non-zero entropy: {len(nonzero_entropy_features)}")
+    for fid, metrics in nonzero_entropy_features.items():
+        print(f"Feature {fid}: entropy = {metrics['entropy']:.3f}")
+
     # Prepare JSON output
     metrics_json = {
         "summary": {
             "total_features": len(scored_storage),
             "features_with_activations": len(all_metrics),
             "spatial_sparsity": float(sparsity),
-            "avg_spatial_spread": float(avg_spread),
-            "index_of_dispersion": float(index_of_dispersion),
+            #"avg_spatial_spread": float(avg_spread),
+            #"index_of_dispersion": float(index_of_dispersion),
             #"avg_concentration_ratio": float(avg_concentration),
             #"avg_activation_area": float(avg_area)
         },
